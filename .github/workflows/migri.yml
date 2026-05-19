@@ -19,3 +19,4 @@ jobs:
 
       - name: Check Migri appointments
         run: python check_migri.py
+        continue-on-error: true
