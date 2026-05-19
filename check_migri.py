@@ -91,17 +91,11 @@ async def get_slots():
                 await page.wait_for_timeout(1500)
                 break
 
-        # Step 4: Click "Hae vapaat ajat" (Search availability)
+        # Step 4: Click search — use the desktop button (mobile one is hidden)
         print("Step 4: Clicking search...")
-        search_btn = page.locator("button.ladda-button:not([disabled])")
-        if await search_btn.count() > 0:
-            await search_btn.first.click()
-            print("Clicked search button")
-        else:
-            # Try by text
-            btn = page.get_by_text("Hae vapaat ajat")
-            await btn.first.click()
-            print("Clicked by text")
+        search_btn = page.locator("[data-ng-click='searchDesktop()']")
+        await search_btn.click()
+        print("Clicked search button")
 
         await page.wait_for_timeout(8000)
 
