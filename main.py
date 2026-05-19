@@ -1,28 +1,46 @@
 #!/usr/bin/env python3
 """
-Migri Appointment Checker
-Checks Helsinki Migri office for Permanent Residence Permit slots.
-Sends iPhone notifications via ntfy.sh
+Migri Appointment Checker — Direct API version
+No browser needed. Calls the Vihta JSON API directly.
+Gets exact appointment times, not just dates.
+
+Service: Permanent Residence Permit (5.)
+Office:  Helsinki service point
 """
 
-import asyncio
-import re
 import sys
+import time
 from datetime import datetime
-from dateutil import parser as dateparser
 import requests
 
 # ─────────────────────────────────────────
-# YOUR SETTINGS
+# YOUR SETTINGS — only edit these
 # ─────────────────────────────────────────
-DEADLINE_DATE        = "2026-07-12"      # alert only if slot is before this date
-NTFY_TOPIC           = "Migri_Appointment"  # your ntfy topic name
-CHECK_INTERVAL_SECS  = 900              # 900 = every 15 minutes
-NOTIFY_EVERY_CHECK   = True            # True = send a status ping every check (so you know it's alive)
+DEADLINE_DATE       = "2026-07-12"        # Alert if slot found before this date
+NTFY_TOPIC          = "Migri_Appointment" # Your ntfy topic name
+CHECK_INTERVAL_SECS = 900                 # 900 = every 15 minutes
 # ─────────────────────────────────────────
 
-MIGRI_URL = "https://migri.vihta.com/public/migri/#/reservation"
-DEADLINE  = datetime.strptime(DEADLINE_DATE, "%Y-%m-%d").date()
+# Migri/Vihta API — fixed IDs, do not change
+SERVICE_ID  = "3e03034d-a44b-4771-b1e5-2c4a6f581b7d"  # 5. Permanent residence permit
+OFFICE_ID   = "25ee3bce-aec9-41a7-b920-74dc09112dd4"  # Helsinki service point
+OFFICE_NAME = "Helsinki service point"
+MIGRI_URL   = "https://migri.vihta.com/public/migri/#/reservation"
+API_BASE    = "https://migri.vihta.com/public/migri/api"
+
+HEADERS = {
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://migri.vihta.com",
+    "Referer": "https://migri.vihta.com/public/migri/",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+}
+
+DEADLINE = datetime.strptime(DEADLINE_DATE, "%Y-%m-%d").date()
 
 
 def now():
@@ -30,253 +48,165 @@ def now():
 
 
 def notify(title, message, priority="default"):
-    """Send push notification to iPhone via ntfy.sh"""
-    priority_map = {"urgent": "urgent", "high": "high", "default": "default", "low": "low"}
     try:
         r = requests.post(
             f"https://ntfy.sh/{NTFY_TOPIC}",
             data=message.encode("utf-8"),
             headers={
                 "Title": title,
-                "Priority": priority_map.get(priority, "default"),
+                "Priority": priority,
                 "Tags": "calendar",
                 "Click": MIGRI_URL,
             },
             timeout=10,
         )
-        print(f"[ntfy] Sent: {title} (status {r.status_code})")
+        print(f"[ntfy] '{title}' → {r.status_code}")
     except Exception as e:
         print(f"[ntfy] Error: {e}")
 
 
-async def check_migri():
-    """
-    Opens Migri booking site in a real browser, navigates to the
-    Helsinki PR appointment calendar, and returns all available dates.
-    """
-    from playwright.async_api import async_playwright
-
+def get_slots():
+    """Call Vihta API and return list of available slot dicts."""
     slots = []
-    page_html = ""
+    endpoints = [
+        f"{API_BASE}/reservations/times?serviceId={SERVICE_ID}&officeId={OFFICE_ID}&numberOfCustomers=1",
+        f"{API_BASE}/services/{SERVICE_ID}/offices/{OFFICE_ID}/times?numberOfCustomers=1",
+        f"{API_BASE}/offices/{OFFICE_ID}/services/{SERVICE_ID}/available-times?customers=1",
+    ]
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
-        )
-        page = await browser.new_page(
-            locale="en-US",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
-        )
-
+    for url in endpoints:
         try:
-            print(f"[{now()}] Loading Migri page...")
-            await page.goto(MIGRI_URL, wait_until="networkidle", timeout=60000)
-            await page.wait_for_timeout(4000)
-
-            # ── Step 1: Pick service category ──
-            # The page uses Angular/custom dropdowns — try clicking the first one
-            print(f"[{now()}] Selecting service type...")
-            
-            # Try native select first
-            selects = await page.locator("select").all()
-            print(f"[{now()}] Found {len(selects)} select elements")
-
-            if len(selects) >= 1:
-                await selects[0].select_option(index=1)  # first real option
-                await page.wait_for_timeout(1500)
-                # Try to find "Residence permit" option
-                opts = await selects[0].locator("option").all()
-                for opt in opts:
-                    txt = (await opt.inner_text()).strip()
-                    if "residence" in txt.lower() or "oleskelulupa" in txt.lower():
-                        await selects[0].select_option(label=txt)
-                        print(f"[{now()}] Selected: {txt}")
-                        await page.wait_for_timeout(2000)
-                        break
-
-            # ── Step 2: Pick sub-type (Permanent residence permit) ──
-            selects = await page.locator("select").all()
-            if len(selects) >= 2:
-                opts = await selects[1].locator("option").all()
-                for opt in opts:
-                    txt = (await opt.inner_text()).strip()
-                    if "permanent" in txt.lower() or "pysyvä" in txt.lower() or "5." in txt:
-                        await selects[1].select_option(label=txt)
-                        print(f"[{now()}] Selected sub-type: {txt}")
-                        await page.wait_for_timeout(2000)
-                        break
-
-            # ── Step 3: Pick Helsinki location ──
-            selects = await page.locator("select").all()
-            for sel in selects:
-                opts = await sel.locator("option").all()
-                for opt in opts:
-                    txt = (await opt.inner_text()).strip()
-                    if "helsinki" in txt.lower() or "malmi" in txt.lower():
-                        await sel.select_option(label=txt)
-                        print(f"[{now()}] Selected location: {txt}")
-                        await page.wait_for_timeout(1500)
-                        break
-
-            # ── Step 4: Click "Search availability" ──
-            print(f"[{now()}] Clicking search...")
-            # Try multiple ways to find the search button
-            for selector in [
-                "button:has-text('Search')",
-                "button:has-text('Hae')",
-                "button:has-text('availability')",
-                "[type='submit']",
-                "input[type='submit']",
-            ]:
-                btn = page.locator(selector)
-                if await btn.count() > 0:
-                    await btn.first.click()
-                    print(f"[{now()}] Clicked: {selector}")
+            print(f"[{now()}] Trying: {url}")
+            r = requests.get(url, headers=HEADERS, timeout=20)
+            print(f"[{now()}] Status: {r.status_code}")
+            if r.status_code == 200:
+                data = r.json()
+                print(f"[{now()}] Response: {str(data)[:400]}")
+                slots = parse_slots(data)
+                if slots or data:  # got a real response, stop trying
                     break
+        except Exception as e:
+            print(f"[{now()}] Error on {url}: {e}")
 
-            await page.wait_for_timeout(6000)
+    return slots
 
-            # ── Step 5: Grab the full page text and HTML ──
-            page_html = await page.content()
-            page_text = await page.inner_text("body")
 
-            # ── Step 6: Find available dates ──
-            # Method A: aria-label on calendar buttons/cells
-            date_els = await page.locator(
-                "[aria-label], td.available, td[class*='available'], "
-                "button[class*='day']:not([disabled]), "
-                ".day:not(.disabled):not(.grey):not(.other-month)"
-            ).all()
+def parse_slots(data):
+    slots = []
+    items = []
 
-            for el in date_els:
-                try:
-                    label = await el.get_attribute("aria-label") or ""
-                    text  = (await el.inner_text()).strip()
-                    raw   = label or text
-                    if raw and len(raw) > 1:
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        for key in ["times", "slots", "availableTimes", "reservationTimes", "data", "results"]:
+            if key in data and isinstance(data[key], list):
+                items = data[key]
+                break
+        if not items:
+            items = [data] if "startTime" in data or "time" in data or "date" in data else []
+
+    for item in items:
+        try:
+            dt = None
+            for key in ["startTime", "start", "time", "dateTime", "datetime", "date", "startDate"]:
+                val = item.get(key)
+                if val and isinstance(val, str) and len(val) >= 10:
+                    try:
+                        dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+                        break
+                    except Exception:
                         try:
-                            d = dateparser.parse(raw, dayfirst=True)
-                            if d:
-                                slots.append(d.date())
+                            dt = datetime.strptime(val[:19], "%Y-%m-%dT%H:%M:%S")
+                            break
                         except Exception:
                             pass
-                except Exception:
-                    pass
-
-            # Method B: regex scan of page text for date patterns
-            if not slots:
-                patterns = re.findall(
-                    r"\b(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})\b"
-                    r"|\b(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})\b",
-                    page_text
-                )
-                for p_match in patterns:
-                    raw = "".join(p_match)
-                    try:
-                        d = dateparser.parse(raw, dayfirst=True)
-                        if d and 2024 <= d.year <= 2030:
-                            slots.append(d.date())
-                    except Exception:
-                        pass
-
-            print(f"[{now()}] Raw dates found: {slots}")
-
+            if dt:
+                slots.append({
+                    "datetime": dt,
+                    "office": item.get("officeName") or item.get("office") or OFFICE_NAME,
+                    "address": item.get("address") or item.get("officeAddress") or "Helsinki",
+                })
         except Exception as e:
-            print(f"[{now()}] Page error: {e}")
-            try:
-                await page.screenshot(path="/tmp/migri_debug.png")
-                print(f"[{now()}] Screenshot saved to /tmp/migri_debug.png")
-            except Exception:
-                pass
+            print(f"[{now()}] Parse error: {e}")
 
-        await browser.close()
-
-    return sorted(set(slots))
+    return slots
 
 
-def format_date(d):
-    """Format date nicely, e.g. Monday 15 June 2026"""
-    return d.strftime("%A %d %B %Y")
+def fmt(slot):
+    dt = slot["datetime"]
+    return (
+        f"{dt.strftime('%A, %d %B %Y')} at {dt.strftime('%H:%M')}\n"
+        f"📍 {slot['office']}"
+    )
 
 
-async def main():
-    print("=" * 50)
-    print("  Migri Appointment Checker")
+def main():
+    print("=" * 55)
+    print("  Migri Appointment Checker (API mode)")
     print(f"  Deadline : {DEADLINE_DATE}")
-    print(f"  Interval : {CHECK_INTERVAL_SECS // 60} minutes")
+    print(f"  Interval : {CHECK_INTERVAL_SECS // 60} min")
     print(f"  ntfy     : {NTFY_TOPIC}")
-    print("=" * 50)
+    print("=" * 55)
 
-    # Startup notification
     notify(
-        "Migri Checker is running",
+        "Migri Checker started ✅",
         f"Watching Helsinki PR appointments before {DEADLINE_DATE}.\n"
-        f"Checking every {CHECK_INTERVAL_SECS // 60} min. You will get an alert if a slot is found.",
-        priority="default"
+        f"Checking every {CHECK_INTERVAL_SECS // 60} min.",
+        priority="low"
     )
 
     check_num = 0
     while True:
         check_num += 1
+        checked_at = datetime.now().strftime("%d %b %Y at %H:%M")
         print(f"\n[{now()}] ── Check #{check_num} ──")
 
         try:
-            all_slots = await check_migri()
+            all_slots = get_slots()
+            all_slots.sort(key=lambda s: s["datetime"])
+            print(f"[{now()}] Found {len(all_slots)} total slots")
 
-            # Filter slots before deadline
-            early = [d for d in all_slots if d <= DEADLINE]
-            all_future = [d for d in all_slots if d > datetime.now().date()]
-
-            checked_at = datetime.now().strftime("%d %b %Y %H:%M")
+            early = [s for s in all_slots if s["datetime"].date() <= DEADLINE]
+            later = [s for s in all_slots if s["datetime"].date() > DEADLINE]
 
             if early:
-                # 🚨 URGENT: slots found before deadline
-                earliest = min(early)
-                slot_list = "\n".join(f"• {format_date(d)}" for d in sorted(early)[:5])
+                earliest = early[0]
+                lines = "\n".join(f"• {fmt(s)}" for s in early[:5])
                 msg = (
-                    f"Earliest slot: {format_date(earliest)}\n"
-                    f"\nAll slots before {DEADLINE_DATE}:\n{slot_list}\n"
-                    f"\nChecked at: {checked_at}\n"
-                    f"👉 Book now at migri.vihta.com"
+                    f"Earliest slot:\n{fmt(earliest)}\n\n"
+                    f"All {len(early)} slot(s) before {DEADLINE_DATE}:\n{lines}\n\n"
+                    f"👉 Book at migri.vihta.com\n"
+                    f"Checked: {checked_at}"
                 )
-                print(f"[{now()}] 🚨 SLOTS FOUND: {early}")
-                notify("🚨 Migri slot available! Book NOW", msg, priority="urgent")
+                print(f"[{now()}] 🚨 {len(early)} early slots found!")
+                notify("🚨 Migri slot available — book NOW!", msg, priority="urgent")
 
-            elif all_future:
-                # Slots exist but all after deadline
-                earliest = min(all_future)
+            elif later:
+                earliest = later[0]
                 msg = (
-                    f"No slots before {DEADLINE_DATE}.\n"
-                    f"Earliest available: {format_date(earliest)}\n"
-                    f"Checked at: {checked_at}"
+                    f"No slots before {DEADLINE_DATE}.\n\n"
+                    f"Earliest available:\n{fmt(earliest)}\n\n"
+                    f"Checked: {checked_at}"
                 )
-                print(f"[{now()}] No early slots. Earliest: {earliest}")
-                if NOTIFY_EVERY_CHECK:
-                    notify("Migri checked — no early slots", msg, priority="low")
+                print(f"[{now()}] No early slots. Earliest: {earliest['datetime'].strftime('%d %b %Y %H:%M')}")
+                notify("Migri checked — no early slots yet", msg, priority="low")
 
             else:
-                # No slots found at all (site may have no availability)
                 msg = (
-                    f"No appointments visible on Migri site.\n"
-                    f"This could mean fully booked or a page load issue.\n"
-                    f"Checked at: {checked_at}"
+                    f"No appointments showing on Migri.\n"
+                    f"Calendar may be fully booked or new slots not released yet.\n\n"
+                    f"Checked: {checked_at}"
                 )
                 print(f"[{now()}] No slots found at all")
-                if NOTIFY_EVERY_CHECK:
-                    notify("Migri checked — no slots visible", msg, priority="low")
+                notify("Migri checked — calendar empty", msg, priority="low")
 
         except Exception as e:
             print(f"[{now()}] Unexpected error: {e}")
-            notify("Migri checker error", f"Error at {now()}:\n{str(e)[:200]}", priority="low")
+            notify("Migri checker error ⚠️", f"Check #{check_num} failed:\n{str(e)[:300]}", priority="low")
 
         print(f"[{now()}] Sleeping {CHECK_INTERVAL_SECS // 60} min...")
-        await asyncio.sleep(CHECK_INTERVAL_SECS)
+        time.sleep(CHECK_INTERVAL_SECS)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
