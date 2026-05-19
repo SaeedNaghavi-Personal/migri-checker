@@ -35,7 +35,7 @@ NOTIFY_METHOD = "ntfy"   # change to "pushover" if preferred
 # ntfy.sh config (free, no account needed)
 # 1. Install the ntfy app on your iPhone: https://apps.apple.com/app/ntfy/id1625396347
 # 2. Subscribe to your unique topic name in the app (make it random/private!)
-NTFY_TOPIC = "migri-checker-YOUR-UNIQUE-TOPIC-HERE"  # <-- change this!
+NTFY_TOPIC = "Migri_Appointment"  # <-- change this!
 
 # Pushover config (if using Pushover instead)
 PUSHOVER_USER_KEY = ""   # from pushover.net dashboard
