@@ -74,8 +74,22 @@ async def get_slots():
         await pick_option(page, "entitySelections.service.value", "5.")
 
         # Step 3: Select office — Helsinki
+        # Office dropdown uses data-ng-model instead of ng-model
         print("Step 3: Selecting office...")
-        await pick_option(page, "entitySelections.locality.value", "Helsinki")
+        office_dropdown = page.locator("[data-ng-model='entitySelections.locality.value']")
+        if await office_dropdown.count() == 0:
+            office_dropdown = page.locator("[ng-model='entitySelections.locality.value']")
+        await office_dropdown.click()
+        await page.wait_for_timeout(800)
+        options = await page.locator("[role='option']").all()
+        print(f"  Office options: {len(options)}")
+        for opt in options:
+            txt = (await opt.inner_text()).strip()
+            if "helsinki" in txt.lower() or "malmi" in txt.lower():
+                await opt.click()
+                print(f"  Selected office: '{txt}'")
+                await page.wait_for_timeout(1500)
+                break
 
         # Step 4: Click "Hae vapaat ajat" (Search availability)
         print("Step 4: Clicking search...")
