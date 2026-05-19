@@ -16,7 +16,7 @@ import requests
 # ─────────────────────────────────────────
 # YOUR SETTINGS — only edit these
 # ─────────────────────────────────────────
-DEADLINE_DATE       = "2026-07-12"        # Alert if slot found before this date
+DEADLINE_DATE       = "2026-08-08"        # Alert if slot found before this date
 NTFY_TOPIC          = "Migri_Appointment" # Your ntfy topic name
 CHECK_INTERVAL_SECS = 900                 # 900 = every 15 minutes
 # ─────────────────────────────────────────
