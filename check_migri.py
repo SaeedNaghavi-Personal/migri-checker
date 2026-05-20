@@ -26,36 +26,70 @@ def telegram(message):
         print(f"[telegram] error: {e}")
 
 
-async def extract_current_day_slots(page):
-    """
-    Extract slots for currently selected day
-    (NO clicking, just read what's visible)
-    """
-    text = await page.inner_text("body")
+async def extract_slots_week(page, week_dates_raw):
+    slots = []
 
-    # ✅ Find selected date (format: Tue 11/08 or 11/08)
-    m = re.search(r'\b(\d{1,2})/(\d{2})\b', text)
-    if not m:
-        print("⚠️ Could not detect selected date")
-        return []
+    # ✅ find ALL clickable day cells in calendar row
+    day_cells = page.locator("[ng-click*='selectDay'], [data-ng-click*='selectDay']")
 
-    day = int(m.group(1))
-    month = int(m.group(2))
+    count = await day_cells.count()
+    print(f"Found {count} clickable day cells")
 
-    dt = datetime(YEAR, month, day).date()
+    if count == 0:
+        print("⚠️ No calendar day cells found")
+        return slots
 
-    times = re.findall(r'\b\d{1,2}:\d{2}\b', text)
+    for i in range(min(7, count)):
+        try:
+            date_str = week_dates_raw[i]
+            dt = datetime.strptime(f"{date_str}.{YEAR}", "%d.%m.%Y").date()
 
-    print(f" Selected day: {dt}, found {len(times)} times")
+            # ✅ click actual day cell (real Angular handler)
+            await day_cells.nth(i).click()
+            await page.wait_for_timeout(1500)
 
-    return [
-        {
-            "date": dt,
-            "time": t,
-            "office": "Helsinki (Malmi)"
-        }
-        for t in times
-    ]
+            print(f" Clicking day {date_str}")
+
+            # ✅ click time-of-day tabs (important)
+            for tab_name in ["Morning", "Day", "Afternoon", "Evening"]:
+                try:
+                    tab = page.get_by_text(tab_name)
+                    if await tab.count() > 0:
+                        await tab.first.click()
+                        await page.wait_for_timeout(700)
+                except:
+                    pass
+
+            # ✅ extract times from visible slots
+            times = await page.evaluate("""
+                () => {
+                    const out = [];
+                    const elements = document.querySelectorAll('*');
+
+                    elements.forEach(el => {
+                        const t = el.innerText?.trim();
+                        if (t && /^\\d{1,2}:\\d{2}$/.test(t)) {
+                            out.push(t);
+                        }
+                    });
+
+                    return [...new Set(out)];
+                }
+            """)
+
+            print(f"  → Found {len(times)} slots")
+
+            for t in times:
+                slots.append({
+                    "date": dt,
+                    "time": t,
+                    "office": "Helsinki (Malmi)"
+                })
+
+        except Exception as e:
+            print(f"Day error: {e}")
+
+    return slots
 
 
 async def get_all_slots():
@@ -68,7 +102,7 @@ async def get_all_slots():
 
         page = await browser.new_page(
             locale="fi-FI",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+            user_agent="Mozilla/5.0"
         )
 
         print("Loading Migri...")
@@ -92,21 +126,19 @@ async def get_all_slots():
 
         print("Step 4: Searching...")
         await page.locator("[data-ng-click='searchDesktop()']").click()
-
         await page.wait_for_timeout(10000)
 
         for week_num in range(15):
 
             page_text = await page.inner_text("body")
-            week_dates_raw = re.findall(r'\b(\d{1,2}\.\d{2})\.', page_text)
+            week_dates_raw = re.findall(r'\b(\d{1,2}\.\d{2})', page_text)
 
             print(f"\nWeek {week_num + 1}: {week_dates_raw[:7]}")
 
-            # ✅ Extract currently visible day ONLY
-            slots = await extract_current_day_slots(page)
-            all_slots.extend(slots)
+            week_slots = await extract_slots_week(page, week_dates_raw)
+            all_slots.extend(week_slots)
 
-            # Deadline check
+            # deadline check
             past_deadline = True
             for d in week_dates_raw[:7]:
                 try:
@@ -117,21 +149,19 @@ async def get_all_slots():
                 except:
                     pass
 
-            if past_deadline and week_dates_raw:
+            if past_deadline:
                 print("Reached past deadline, stopping.")
                 break
 
-            # Next week
             await page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])").first.click()
             print("Clicked next week")
             await page.wait_for_timeout(3000)
 
         await browser.close()
 
-    # Remove duplicates
+    # ✅ deduplicate
     unique = list({
-        (s['date'], s['time']): s
-        for s in all_slots
+        (s['date'], s['time']): s for s in all_slots
     }.values())
 
     return unique
@@ -151,12 +181,7 @@ async def main():
             key=lambda s: (s['date'], s['time'])
         )
 
-        later = sorted(
-            [s for s in all_slots if s['date'] > DEADLINE],
-            key=lambda s: (s['date'], s['time'])
-        )
-
-        print(f"Before deadline: {len(early)}, After: {len(later)}")
+        print(f"Before deadline: {len(early)}")
 
         if early:
             lines = "\n".join(
@@ -164,21 +189,12 @@ async def main():
                 for s in early[:5]
             )
 
-            telegram(
-                f"MIGRI SLOT FOUND!\n\n{len(early)} slot(s):\n{lines}"
-            )
-            print(f"✅ ALERT sent ({len(early)} early slots)")
-
-        elif later:
-            earliest = later[0]
-            telegram(
-                f"Earliest: {earliest['date']} {earliest['time']}"
-            )
-            print(f"No early slots. Earliest: {earliest['date']} {earliest['time']}")
+            telegram(f"MIGRI SLOT FOUND!\n\n{lines}")
+            print("✅ ALERT sent")
 
         else:
-            telegram("No appointments visible")
-            print("❌ No slots found at all")
+            telegram("No appointments found")
+            print("❌ No slots found")
 
     except Exception as e:
         import traceback
