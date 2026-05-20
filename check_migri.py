@@ -26,37 +26,41 @@ def telegram(message):
         print(f"[telegram] error: {e}")
 
 
-async def extract_slots_from_text(page):
+async def extract_slots_by_clicking_days(page, week_dates_raw):
     """
-    Robust extraction: bind each time to its closest date block.
-    Works regardless of DOM structure.
+    Correct approach: click each day tab and extract only that day's times.
     """
-    text = await page.inner_text("body")
-
     slots = []
 
-    # DEBUG (optional)
-    # print(text[:2000])
+    # These match Mon Tue Wed ... in UI (based on your screenshots)
+    day_buttons = page.locator("text=/Mon|Tue|Wed|Thu|Fri|Sat|Sun/")
+    count = await day_buttons.count()
 
-    # Split into date blocks
-    pattern = r'(\d{1,2}\.\d{2})\.\s*((?:.|\n)*?)(?=\d{1,2}\.\d{2}\.|$)'
-    matches = re.findall(pattern, text)
-
-    for date_str, block in matches:
+    for i in range(min(7, count)):
         try:
+            date_str = week_dates_raw[i]
             dt = datetime.strptime(f"{date_str}.{YEAR}", "%d.%m.%Y").date()
-        except Exception:
-            continue
 
-        # Extract times inside this date block
-        times = re.findall(r'\b\d{1,2}:\d{2}\b', block)
+            # Click day
+            await day_buttons.nth(i).click()
+            await page.wait_for_timeout(1500)
 
-        for t in times:
-            slots.append({
-                'date': dt,
-                'time': t,
-                'office': 'Helsinki (Malmi)'
-            })
+            text = await page.inner_text("body")
+
+            # Extract times
+            times = re.findall(r'\b\d{1,2}:\d{2}\b', text)
+
+            print(f" Day {date_str}: {len(times)} slots")
+
+            for t in times:
+                slots.append({
+                    'date': dt,
+                    'time': t,
+                    'office': 'Helsinki (Malmi)'
+                })
+
+        except Exception as e:
+            print(f"Day parse failed: {e}")
 
     return slots
 
@@ -71,7 +75,7 @@ async def get_all_slots():
 
         page = await browser.new_page(
             locale="fi-FI",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         )
 
         print("Loading Migri...")
@@ -96,9 +100,8 @@ async def get_all_slots():
         print("Step 4: Searching...")
         await page.locator("[data-ng-click='searchDesktop()']").click()
 
-        # IMPORTANT: wait longer for Angular rendering
-        await page.wait_for_timeout(8000)
-        await page.wait_for_selector("body")
+        # IMPORTANT: allow Angular UI to load
+        await page.wait_for_timeout(10000)
 
         for week_num in range(15):
 
@@ -107,7 +110,7 @@ async def get_all_slots():
 
             print(f"\nWeek {week_num+1}: {week_dates_raw[:7]}")
 
-            # deadline check
+            # Stop after deadline
             past_deadline = True
             for d in week_dates_raw[:7]:
                 try:
@@ -118,25 +121,29 @@ async def get_all_slots():
                 except:
                     pass
 
-            # ✅ NEW extraction
-            week_slots = await extract_slots_from_text(page)
+            # ✅ KEY FIX: click each day
+            week_slots = await extract_slots_by_clicking_days(page, week_dates_raw)
 
-            for s in week_slots:
-                print(f" Found: {s['date']} {s['time']}")
-                all_slots.append(s)
+            all_slots.extend(week_slots)
 
             if past_deadline and week_dates_raw:
                 print("Reached past deadline, stopping.")
                 break
 
-            # next week
+            # Next week
             await page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])").first.click()
             print("Clicked next week")
             await page.wait_for_timeout(3000)
 
         await browser.close()
 
-    return all_slots
+    # Remove duplicates
+    unique = list({
+        (s['date'], s['time']): s
+        for s in all_slots
+    }.values())
+
+    return unique
 
 
 async def main():
