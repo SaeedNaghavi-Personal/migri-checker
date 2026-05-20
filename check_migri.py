@@ -8,7 +8,7 @@ import requests
 # ─────────────────────────────────────────
 TELEGRAM_TOKEN  = "8729890482:AAHH9BtKBUjYCLDMVKedclifWZ6mS8dTSvE"
 TELEGRAM_CHAT   = "90616504"
-DEADLINE_DATE   = "2026-07-12"  # change this to your deadline
+DEADLINE_DATE   = "2026-08-08"  # change this to your deadline
 MIGRI_URL       = "https://migri.vihta.com/public/migri/#/reservation"
 # ─────────────────────────────────────────
 
