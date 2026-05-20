@@ -37,24 +37,20 @@ async def get_week_slots(page):
             // Locate the primary calendar wrapper element
             const calendarGrid = document.querySelector('.desktop-grid, [role="grid"], table');
             if (!calendarGrid) {{
-                console.log('JS Error: Could not find calendar grid component on screen.');
+                console.log('JS: Core calendar grid element not rendered yet.');
                 return slots;
             }}
 
-            // Find columns or distinct day blocks inside the calendar grid
-            const dayColumns = Array.from(calendarGrid.querySelectorAll('.day-column, th, td, .grid-col'));
-            
-            // If the layout uses a flat list of buttons with parent dates, inspect individual components safely
+            // Find all potential active interactive time slots inside the main layout grid
             const buttons = Array.from(calendarGrid.querySelectorAll('button, a'));
             const timeButtons = buttons.filter(b => /^\\d{{1,2}}:\\d{{2}}$/.test(b.textContent?.trim()));
 
-            console.log('JS: Found ' + timeButtons.length + ' structural times inside the core grid.');
+            console.log('JS: Found ' + timeButtons.length + ' active time elements inside the grid block.');
 
             timeButtons.forEach(btn => {{
                 const timeText = btn.textContent.trim();
                 
-                // Let's attempt an intelligent structural lookup
-                // First: Check if the button has an explicit aria-label containing the date (e.g., "Aika 11.08.2026 klo 09:00")
+                // 1. Check if the button contains a descriptive aria-label containing the date
                 const aria = btn.getAttribute('aria-label') || '';
                 const ariaMatch = aria.match(/(\\d{{1,2}})\\.(\\d{{2}})\\./);
                 if (ariaMatch) {{
@@ -64,14 +60,13 @@ async def get_week_slots(page):
                     return;
                 }}
 
-                // Second: Fallback to crawling strictly UP up to the parent day container inside the grid
+                // 2. Fallback: Crawl structural container parents inside the grid to map dates
                 let parent = btn.parentElement;
                 let foundDate = null;
 
                 for (let i = 0; i < 7; i++) {{
-                    if (!parent || parent === calendarGrid) break;
+                    if (!parent || parent === calendarGrid || parent === document.body) break;
                     
-                    // Look for structural text embedded within this specific grid block element
                     const text = parent.textContent || "";
                     const dateMatch = text.match(/\\b(\\d{{1,2}})\\.(\\d{{2}})\\./);
                     if (dateMatch) {{
@@ -134,22 +129,19 @@ async def get_all_slots():
         await page.locator("[data-ng-click='searchDesktop()']").click()
         await page.wait_for_timeout(6000)
 
-        # Track the signature markup of the last week to make sure our pagination clicks actually work
-        last_page_fingerprint = ""
-
         for week_num in range(15):
-            # Fallback text locator strictly focusing inside the main dynamic presentation node
-            page_html = await page.locator("body").text_content()
-            week_dates_raw = re.findall(r'\b(\d{1,2}\.\d{2})\.', page_html or "")
-            week_dates_raw = list(dict.fromkeys(week_dates_raw)) # De-duplicate safely
+            # Safe text extraction targeting the dynamic layout element context directly
+            page_html = await page.evaluate("() => document.body.textContent || ''")
+            week_dates_raw = re.findall(r'\b(\d{1,2}\.\d{2})\.', page_html)
+            week_dates_raw = list(dict.fromkeys(week_dates_raw))
 
             print(f"\n--- Week {week_num+1} Evaluation ---")
-            print(f"Detected Dates raw context: {week_dates_raw[:7]}")
+            print(f"Detected Week Date Headers: {week_dates_raw[:7]}")
 
-            # Read structural slots
+            # Read raw active slots
             week_slots = await get_week_slots(page)
             
-            # De-duplicate identical slots found on the same iteration frame
+            # Filter duplicates discovered on the current frame viewpoint
             unique_week_slots = []
             seen = set()
             for s in week_slots:
@@ -161,12 +153,12 @@ async def get_all_slots():
             for s in unique_week_slots:
                 try:
                     dt = datetime.strptime(s['date'], "%Y-%m-%d").date()
-                    print(f"  Verified Slot -> Date: {s['date']} | Time: {s['time']}")
+                    print(f"  Verified Slot Found -> {s['date']} @ {s['time']}")
                     all_slots.append({'date': dt, 'time': s['time'], 'office': 'Helsinki (Malmi)'})
                 except Exception as e:
-                    print(f"  Parsing execution error: {e}")
+                    print(f"  Parsing Error: {e}")
 
-            # Smart stopping check using parsed slot timestamps
+            # Smart target condition checks
             past_deadline = True
             if unique_week_slots:
                 for s in unique_week_slots:
@@ -175,7 +167,6 @@ async def get_all_slots():
                         past_deadline = False
                         break
             else:
-                # If zero actual slots are found here, check via raw fallback dates text
                 for d in week_dates_raw[:7]:
                     try:
                         dt = datetime.strptime(f"{d}.{YEAR}", "%d.%m.%Y").date()
@@ -186,29 +177,27 @@ async def get_all_slots():
                         pass
 
             if past_deadline and (unique_week_slots or week_dates_raw):
-                print("All slots or dates monitored in this frame are past deadline. Stopping search safely.")
+                print("All slots or dates analyzed in this frame exceed deadline threshold. Stopping.")
                 break
 
-            # Capture current DOM signature state to verify page switching succeeded
-            try:
-                last_page_fingerprint = await page.locator("[role='grid'], table, .desktop-grid").inner_text()
-            except Exception:
-                last_page_fingerprint = ""
+            # Capture fingerprint using non-blocking pure JS evaluate to prevent Playwright auto-wait hangs
+            last_page_fingerprint = await page.evaluate(
+                "() => document.querySelector('.desktop-grid, [role=\"grid\"], table')?.textContent || ''"
+            )
 
             # Navigate forward smoothly
             next_button = page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])").first
             await next_button.click()
             print("Clicked next week pagination element.")
             
-            # CRITICAL FIX: Wait explicitly for the calendar text to change so we don't scan the same page twice
+            # Rapid, instant polling loops using non-blocking JS checks
             for attempt in range(10):
                 await page.wait_for_timeout(500)
-                try:
-                    current_fingerprint = await page.locator("[role='grid'], table, .desktop-grid").inner_text()
-                    if current_fingerprint != last_page_fingerprint:
-                        break
-                except Exception:
-                    pass
+                current_fingerprint = await page.evaluate(
+                    "() => document.querySelector('.desktop-grid, [role=\"grid\"], table')?.textContent || ''"
+                )
+                if current_fingerprint != last_page_fingerprint:
+                    break
 
         await browser.close()
     return all_slots
@@ -225,7 +214,7 @@ async def main():
         early = sorted([s for s in all_slots if s['date'] <= DEADLINE], key=lambda s: (s['date'], s['time']))
         later = sorted([s for s in all_slots if s['date'] > DEADLINE], key=lambda s: (s['date'], s['time']))
 
-        print(f"Valid early matches: {len(early)} | Later scheduled matches: {len(later)}")
+        print(f"Valid early matches: {len(early)} | Later matches: {len(later)}")
 
         if early:
             lines = "\n".join(
