@@ -7,7 +7,7 @@ import requests
 # Read from environment variables (set by GitHub Secrets)
 TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT   = os.environ["TELEGRAM_CHAT"]
-DEADLINE_DATE   = "2026-08-08"  # change this to your deadline
+DEADLINE_DATE   = "2026-08-12"  # change this to your deadline
 MIGRI_URL       = "https://migri.vihta.com/public/migri/#/reservation"
 
 DEADLINE = datetime.strptime(DEADLINE_DATE, "%Y-%m-%d").date()
