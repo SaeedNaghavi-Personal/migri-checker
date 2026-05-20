@@ -1,7 +1,7 @@
 import asyncio
 import re
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 
 TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
@@ -24,59 +24,75 @@ def telegram(message):
         print(f"[telegram] error: {e}")
 
 
-def parse_week(text):
-    """Parse one week's slots from page text. Returns list of {date, time} dicts."""
-    slots = []
-    cal_start = text.find("Toimipiste")
-    if cal_start == -1:
-        return slots
+async def get_week_slots(page):
+    """
+    Use JavaScript to read the DOM directly.
+    Finds each day column header (date) and all time buttons under it.
+    This is reliable because it reads the actual DOM structure, not text.
+    """
+    slots = await page.evaluate(f"""
+        () => {{
+            const slots = [];
+            const year = {YEAR};
 
-    cal_text = text[cal_start:]
+            // Find all day column headers — they contain dates like "10.08."
+            // The calendar uses a grid where each column = one day
+            const allEls = Array.from(document.querySelectorAll('*'));
 
-    # Extract dates like "18.05." in order
-    dates_raw = re.findall(r'\b(\d{1,2}\.\d{2})\.\s', cal_text)
-    dates = []
-    for d in dates_raw:
-        try:
-            dt = datetime.strptime(f"{d}.{YEAR}", "%d.%m.%Y").date()
-            if dt not in dates:
-                dates.append(dt)
-        except Exception:
-            pass
+            // Find elements whose text is exactly a date pattern like "10.08."
+            const dateEls = allEls.filter(el => {{
+                const t = el.innerText ? el.innerText.trim() : '';
+                return /^\\d{{1,2}}\\.\\d{{2}}\\.$/.test(t) && el.children.length === 0;
+            }});
 
-    if not dates:
-        return slots
+            console.log('Date elements found:', dateEls.length);
 
-    # Split by "Ei aikoja" (no times) or find time chunks per day
-    # Each day column either has times or "Ei aikoja"
-    # Split the times section by day using "Ei aikoja" as marker for empty days
-    office_end = cal_text.find("00700 Helsinki")
-    if office_end == -1:
-        office_end = cal_text.find("Kaupparaitti")
-    if office_end == -1:
-        office_end = cal_text.find("Helsingin palvelupiste")
+            dateEls.forEach(dateEl => {{
+                const dateText = dateEl.innerText.trim(); // e.g. "10.08."
+                const dateParts = dateText.replace(/\\.$/, '').split('.');
+                const day = parseInt(dateParts[0]);
+                const month = parseInt(dateParts[1]);
+                const fullDate = year + '-' + String(month).padStart(2,'0') + '-' + String(day).padStart(2,'0');
 
-    times_section = cal_text[office_end:] if office_end != -1 else cal_text
+                // Walk up to find the column container
+                // Try up to 6 levels up to find the column
+                let col = dateEl;
+                for (let i = 0; i < 6; i++) {{
+                    col = col.parentElement;
+                    if (!col) break;
 
-    # Split into per-day chunks using "Ei aikoja" as separator for empty days
-    # and "Lisää" as separator between days with times
-    day_chunks = re.split(r'Ei aikoja|Lisää\s*▼?', times_section)
-    # First chunk is always office address info, skip it
-    day_chunks = day_chunks[1:]
+                    // Find all time buttons in this column
+                    const timeButtons = Array.from(col.querySelectorAll('button, a')).filter(btn => {{
+                        const t = btn.innerText ? btn.innerText.trim() : '';
+                        return /^\\d{{1,2}}:\\d{{2}}$/.test(t);
+                    }});
 
-    print(f"  Week dates: {dates}")
-    print(f"  Day chunks count: {len(day_chunks)}")
+                    if (timeButtons.length > 0) {{
+                        // Make sure this column doesn't contain other date elements
+                        // (to avoid grabbing the whole table)
+                        const otherDates = Array.from(col.querySelectorAll('*')).filter(el => {{
+                            const t = el.innerText ? el.innerText.trim() : '';
+                            return /^\\d{{1,2}}\\.\\d{{2}}\\.$/.test(t) && el !== dateEl && el.children.length === 0;
+                        }});
 
-    for i, (date, chunk) in enumerate(zip(dates, day_chunks)):
-        times = list(dict.fromkeys(re.findall(r'\b(\d{1,2}:\d{2})\b', chunk)))  # deduplicate
-        for t in times:
-            slots.append({'date': date, 'time': t, 'office': 'Helsinki (Malmi)'})
-            print(f"  Found: {date} {t}")
+                        if (otherDates.length === 0) {{
+                            // This is the right column — extract unique times
+                            const times = [...new Set(timeButtons.map(b => b.innerText.trim()))];
+                            times.forEach(t => slots.push({{date: fullDate, time: t}}));
+                            console.log('Date:', fullDate, 'Times:', times);
+                            break;
+                        }}
+                    }}
+                }}
+            }});
 
+            return slots;
+        }}
+    """)
     return slots
 
 
-async def get_slots():
+async def get_all_slots():
     from playwright.async_api import async_playwright
 
     all_slots = []
@@ -114,20 +130,15 @@ async def get_slots():
         await page.locator("[data-ng-click='searchDesktop()']").click()
         await page.wait_for_timeout(6000)
 
-        # Step 5: Navigate weeks until deadline
-        today = datetime.now().date()
-        max_weeks = 15  # scan up to 15 weeks ahead
-
-        for week_num in range(max_weeks):
+        for week_num in range(15):
+            # Get current week dates from page text
             page_text = await page.inner_text("body")
+            week_dates_raw = re.findall(r'\b(\d{1,2}\.\d{2})\.\s', page_text[page_text.find("Toimipiste"):])
+            print(f"\nWeek {week_num+1}: {week_dates_raw[:7]}")
 
-            # Check what week we're on
-            week_dates = re.findall(r'\b(\d{1,2}\.\d{2})\.\s', page_text[page_text.find("Toimipiste"):])
-            print(f"\nWeek {week_num+1}: dates found = {week_dates[:7]}")
-
-            # Check if all dates in this week are past deadline
+            # Check if past deadline
             past_deadline = True
-            for d in week_dates:
+            for d in week_dates_raw[:7]:
                 try:
                     dt = datetime.strptime(f"{d}.{YEAR}", "%d.%m.%Y").date()
                     if dt <= DEADLINE:
@@ -136,18 +147,23 @@ async def get_slots():
                 except Exception:
                     pass
 
-            # Parse this week's slots
-            week_slots = parse_week(page_text)
-            all_slots.extend(week_slots)
+            # Read slots via JavaScript DOM
+            week_slots = await get_week_slots(page)
+            for s in week_slots:
+                try:
+                    dt = datetime.strptime(s['date'], "%Y-%m-%d").date()
+                    print(f"  Found: {s['date']} {s['time']}")
+                    all_slots.append({'date': dt, 'time': s['time'], 'office': 'Helsinki (Malmi)'})
+                except Exception as e:
+                    print(f"  Parse error: {e}")
 
-            if past_deadline and week_dates:
-                print(f"Reached past deadline, stopping.")
+            if past_deadline and week_dates_raw:
+                print("Reached past deadline, stopping.")
                 break
 
-            # Click next week button - use desktop version (not mobile)
-            next_btn = page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])").first
-            await next_btn.click()
-            print(f"Clicked next week")
+            # Next week
+            await page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])").first.click()
+            print("Clicked next week")
             await page.wait_for_timeout(2000)
 
         await browser.close()
@@ -159,8 +175,8 @@ async def main():
     print(f"Checking at {checked_at}, deadline {DEADLINE_DATE}")
 
     try:
-        all_slots = await get_slots()
-        print(f"\nTotal slots found: {len(all_slots)}")
+        all_slots = await get_all_slots()
+        print(f"\nTotal slots: {len(all_slots)}")
 
         early = sorted([s for s in all_slots if s['date'] <= DEADLINE], key=lambda s: (s['date'], s['time']))
         later = sorted([s for s in all_slots if s['date'] > DEADLINE], key=lambda s: (s['date'], s['time']))
