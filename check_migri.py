@@ -26,57 +26,36 @@ def telegram(message):
         print(f"[telegram] error: {e}")
 
 
-async def extract_slots_for_week(page, week_dates_raw):
-    slots = []
+async def extract_current_day_slots(page):
+    """
+    Extract slots for currently selected day
+    (NO clicking, just read what's visible)
+    """
+    text = await page.inner_text("body")
 
-    day_buttons = page.locator("button").filter(
-        has_text=re.compile(r"\d{1,2}/\d{2}")
-    )
+    # ✅ Find selected date (format: Tue 11/08 or 11/08)
+    m = re.search(r'\b(\d{1,2})/(\d{2})\b', text)
+    if not m:
+        print("⚠️ Could not detect selected date")
+        return []
 
-    count = await day_buttons.count()
-    print(f"Found {count} day buttons")
+    day = int(m.group(1))
+    month = int(m.group(2))
 
-    if count == 0:
-        print("⚠️ No day buttons detected")
-        return slots
+    dt = datetime(YEAR, month, day).date()
 
-    for i in range(min(7, count)):
-        try:
-            date_str = week_dates_raw[i]
-            dt = datetime.strptime(f"{date_str}.{YEAR}", "%d.%m.%Y").date()
+    times = re.findall(r'\b\d{1,2}:\d{2}\b', text)
 
-            await day_buttons.nth(i).click()
-            await page.wait_for_timeout(1500)
+    print(f" Selected day: {dt}, found {len(times)} times")
 
-            print(f" Clicking day {date_str}")
-
-            tabs = ["Morning", "Day", "Afternoon", "Evening"]
-
-            for tab in tabs:
-                try:
-                    tab_btn = page.get_by_text(tab)
-                    if await tab_btn.count() > 0:
-                        await tab_btn.first.click()
-                        await page.wait_for_timeout(800)
-                except:
-                    pass
-
-            text = await page.inner_text("body")
-            times = re.findall(r'\b\d{1,2}:\d{2}\b', text)
-
-            print(f"  → Found {len(times)} slots")
-
-            for t in times:
-                slots.append({
-                    "date": dt,
-                    "time": t,
-                    "office": "Helsinki (Malmi)"
-                })
-
-        except Exception as e:
-            print(f"Day parse failed: {e}")
-
-    return slots
+    return [
+        {
+            "date": dt,
+            "time": t,
+            "office": "Helsinki (Malmi)"
+        }
+        for t in times
+    ]
 
 
 async def get_all_slots():
@@ -87,7 +66,6 @@ async def get_all_slots():
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
 
-        # ✅ ✅ FIXED HERE
         page = await browser.new_page(
             locale="fi-FI",
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
@@ -124,6 +102,11 @@ async def get_all_slots():
 
             print(f"\nWeek {week_num + 1}: {week_dates_raw[:7]}")
 
+            # ✅ Extract currently visible day ONLY
+            slots = await extract_current_day_slots(page)
+            all_slots.extend(slots)
+
+            # Deadline check
             past_deadline = True
             for d in week_dates_raw[:7]:
                 try:
@@ -134,19 +117,18 @@ async def get_all_slots():
                 except:
                     pass
 
-            week_slots = await extract_slots_for_week(page, week_dates_raw)
-            all_slots.extend(week_slots)
-
             if past_deadline and week_dates_raw:
                 print("Reached past deadline, stopping.")
                 break
 
+            # Next week
             await page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])").first.click()
             print("Clicked next week")
             await page.wait_for_timeout(3000)
 
         await browser.close()
 
+    # Remove duplicates
     unique = list({
         (s['date'], s['time']): s
         for s in all_slots
@@ -182,24 +164,16 @@ async def main():
                 for s in early[:5]
             )
 
-            msg = (
-                f"MIGRI SLOT FOUND!\n\n"
-                f"{len(early)} slot(s) before {DEADLINE_DATE}:\n"
-                f"{lines}"
+            telegram(
+                f"MIGRI SLOT FOUND!\n\n{len(early)} slot(s):\n{lines}"
             )
-
-            telegram(msg)
             print(f"✅ ALERT sent ({len(early)} early slots)")
 
         elif later:
             earliest = later[0]
-
-            msg = (
-                f"No early slots.\n"
+            telegram(
                 f"Earliest: {earliest['date']} {earliest['time']}"
             )
-
-            telegram(msg)
             print(f"No early slots. Earliest: {earliest['date']} {earliest['time']}")
 
         else:
