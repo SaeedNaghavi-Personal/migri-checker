@@ -1,7 +1,7 @@
 import asyncio
 import re
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 
 TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
@@ -24,30 +24,16 @@ def telegram(message):
         print(f"[telegram] error: {e}")
 
 
-def parse_page_text(text):
-    """
-    Parse the Migri calendar page text.
-    The format is:
-      vk 29
-      Toimipiste  Ma  10.08.  Ti  11.08.  Ke  12.08. ...
-      Helsingin palvelupiste (Malmi)
-      Kaupparaitti 10
-      14:45  08:15  08:45  09:15 ...   <- times per column (day)
-
-    We extract dates and match each time column to its date.
-    """
+def parse_week(text):
+    """Parse one week's slots from page text. Returns list of {date, time} dicts."""
     slots = []
-
-    # Find the calendar section - starts with "Toimipiste"
     cal_start = text.find("Toimipiste")
     if cal_start == -1:
-        print("No 'Toimipiste' found in page - search may not have returned results")
         return slots
 
     cal_text = text[cal_start:]
-    print(f"Calendar section:\n{cal_text[:600]}")
 
-    # Extract all dates like "10.08." in order
+    # Extract dates like "18.05." in order
     dates_raw = re.findall(r'\b(\d{1,2}\.\d{2})\.\s', cal_text)
     dates = []
     for d in dates_raw:
@@ -57,66 +43,41 @@ def parse_page_text(text):
                 dates.append(dt)
         except Exception:
             pass
-    print(f"Dates found: {dates}")
 
     if not dates:
         return slots
 
-    # Find the section after the office name/address
-    # Office section: "Helsingin palvelupiste (Malmi)\nKaupparaitti 10\n00700 Helsinki\n"
-    # Then times appear column by column
-    office_match = re.search(r'Helsingin palvelupiste.*?\n.*?\n.*?\n', cal_text, re.DOTALL)
-    if office_match:
-        times_section = cal_text[office_match.end():]
-    else:
-        times_section = cal_text
+    # Split by "Ei aikoja" (no times) or find time chunks per day
+    # Each day column either has times or "Ei aikoja"
+    # Split the times section by day using "Ei aikoja" as marker for empty days
+    office_end = cal_text.find("00700 Helsinki")
+    if office_end == -1:
+        office_end = cal_text.find("Kaupparaitti")
+    if office_end == -1:
+        office_end = cal_text.find("Helsingin palvelupiste")
 
-    print(f"Times section:\n{times_section[:300]}")
+    times_section = cal_text[office_end:] if office_end != -1 else cal_text
 
-    # Extract all time tokens
-    all_times = re.findall(r'\b(\d{1,2}:\d{2})\b', times_section)
-    print(f"All times: {all_times}")
+    # Split into per-day chunks using "Ei aikoja" as separator for empty days
+    # and "Lisää" as separator between days with times
+    day_chunks = re.split(r'Ei aikoja|Lisää\s*▼?', times_section)
 
-    # The times appear left-to-right, top-to-bottom per column
-    # From the previous log we saw each day had ~10 times
-    # We group them by number of days
-    n_days = len(dates)
-    if n_days == 0:
-        return slots
+    print(f"  Week dates: {dates}")
+    print(f"  Day chunks count: {len(day_chunks)}")
 
-    # Split times into per-day chunks
-    # Look for "Lisää" (More) markers which separate columns
-    # Or split evenly
-    chunks_raw = re.split(r'Lisää|Ei aikoja', times_section)
-    print(f"Chunks: {len(chunks_raw)}")
-
-    day_times = []
-    for chunk in chunks_raw:
-        times_in_chunk = re.findall(r'\b(\d{1,2}:\d{2})\b', chunk)
-        if times_in_chunk:
-            day_times.append(times_in_chunk)
-
-    print(f"Day chunks: {day_times}")
-
-    # Map each chunk to a date
-    for i, (date, times) in enumerate(zip(dates, day_times)):
+    for i, (date, chunk) in enumerate(zip(dates, day_chunks)):
+        times = re.findall(r'\b(\d{1,2}:\d{2})\b', chunk)
         for t in times:
             slots.append({'date': date, 'time': t, 'office': 'Helsinki (Malmi)'})
-            print(f"  Slot: {date} {t}")
-
-    # If chunks didn't work, fall back to even split
-    if not slots and all_times:
-        chunk_size = max(1, len(all_times) // n_days)
-        for i, date in enumerate(dates):
-            for t in all_times[i*chunk_size:(i+1)*chunk_size]:
-                slots.append({'date': date, 'time': t, 'office': 'Helsinki (Malmi)'})
-                print(f"  Even-split slot: {date} {t}")
+            print(f"  Found: {date} {t}")
 
     return slots
 
 
 async def get_slots():
     from playwright.async_api import async_playwright
+
+    all_slots = []
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -149,12 +110,61 @@ async def get_slots():
 
         print("Step 4: Searching...")
         await page.locator("[data-ng-click='searchDesktop()']").click()
-        await page.wait_for_timeout(8000)
+        await page.wait_for_timeout(6000)
 
-        page_text = await page.inner_text("body")
+        # Step 5: Navigate weeks until deadline
+        today = datetime.now().date()
+        max_weeks = 15  # scan up to 15 weeks ahead
+
+        for week_num in range(max_weeks):
+            page_text = await page.inner_text("body")
+
+            # Check what week we're on
+            week_dates = re.findall(r'\b(\d{1,2}\.\d{2})\.\s', page_text[page_text.find("Toimipiste"):])
+            print(f"\nWeek {week_num+1}: dates found = {week_dates[:7]}")
+
+            # Check if all dates in this week are past deadline
+            past_deadline = True
+            for d in week_dates:
+                try:
+                    dt = datetime.strptime(f"{d}.{YEAR}", "%d.%m.%Y").date()
+                    if dt <= DEADLINE:
+                        past_deadline = False
+                        break
+                except Exception:
+                    pass
+
+            # Parse this week's slots
+            week_slots = parse_week(page_text)
+            all_slots.extend(week_slots)
+
+            if past_deadline and week_dates:
+                print(f"Reached past deadline, stopping.")
+                break
+
+            # Click next week button
+            next_btn = page.locator(
+                "[data-ng-click*='next'], [ng-click*='next'], "
+                "button[class*='next'], [aria-label*='next'], "
+                "[aria-label*='seuraava'], button:has-text('>')"
+            )
+            if await next_btn.count() > 0:
+                await next_btn.first.click()
+                print(f"Clicked next week")
+                await page.wait_for_timeout(2000)
+            else:
+                # Try clicking the week number tabs (vk 30, vk 31 etc)
+                week_tabs = await page.locator("[data-ng-click*='week'], [ng-click*='week'], .week-tab, [class*='week']").all()
+                print(f"Week tabs found: {len(week_tabs)}")
+                if week_tabs and week_num < len(week_tabs) - 1:
+                    await week_tabs[week_num + 1].click()
+                    await page.wait_for_timeout(2000)
+                else:
+                    print("No next button found, stopping")
+                    break
+
         await browser.close()
-
-    return parse_page_text(page_text)
+    return all_slots
 
 
 async def main():
@@ -163,7 +173,7 @@ async def main():
 
     try:
         all_slots = await get_slots()
-        print(f"Total slots: {len(all_slots)}")
+        print(f"\nTotal slots found: {len(all_slots)}")
 
         early = sorted([s for s in all_slots if s['date'] <= DEADLINE], key=lambda s: (s['date'], s['time']))
         later = sorted([s for s in all_slots if s['date'] > DEADLINE], key=lambda s: (s['date'], s['time']))
@@ -200,7 +210,7 @@ async def main():
 
         else:
             telegram(f"Migri checked - no appointments visible\nChecked: {checked_at}")
-            print("No slots found")
+            print("No slots found at all")
 
     except Exception as e:
         import traceback
