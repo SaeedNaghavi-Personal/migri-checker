@@ -1,5 +1,4 @@
 import asyncio
-import re
 import os
 from datetime import datetime
 import requests
@@ -38,22 +37,45 @@ async def get_all_slots():
             try:
                 url = response.url
 
-                if "timeslot" in url.lower() or "available" in url.lower():
-                    data = await response.text()
+                # ✅ DEBUG: print all API calls once
+                if "vihta" in url:
+                    print("API URL:", url)
 
-                    dates = re.findall(r"\d{4}-\d{2}-\d{2}", data)
-                    times = re.findall(r"\d{1,2}:\d{2}", data)
+                # ✅ TARGET: reservation API (this is the real one)
+                if "reservation" in url.lower() and response.request.resource_type == "xhr":
+                    try:
+                        data = await response.json()
+                    except:
+                        return
 
-                    for d, t in zip(dates, times):
-                        try:
-                            dt = datetime.strptime(d, "%Y-%m-%d").date()
-                            collected_slots.append({
-                                "date": dt,
-                                "time": t,
-                                "office": "Helsinki (Malmi)"
-                            })
-                        except:
-                            pass
+                    # ✅ extract slots safely
+                    def find_slots(obj):
+                        if isinstance(obj, dict):
+                            for k, v in obj.items():
+                                if k.lower() in ["date", "starttime", "time"]:
+                                    print("DEBUG FIELD:", k, v)
+                                find_slots(v)
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                find_slots(item)
+
+                    find_slots(data)
+
+                    # ✅ generic extraction
+                    import re
+                    dates = re.findall(r"\d{4}-\d{2}-\d{2}", str(data))
+                    times = re.findall(r"\d{2}:\d{2}", str(data))
+
+                    for d in dates:
+                        for t in times:
+                            try:
+                                dt = datetime.strptime(d, "%Y-%m-%d").date()
+                                collected_slots.append({
+                                    "date": dt,
+                                    "time": t
+                                })
+                            except:
+                                pass
 
             except:
                 pass
@@ -62,30 +84,32 @@ async def get_all_slots():
 
         print("Loading Migri...")
         await page.goto(MIGRI_URL, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(4000)
 
-        print("Step 1: Residence permit...")
+        print("Step 1...")
         await page.locator("[ng-model='entitySelections.category.value']").click()
         await page.get_by_role("option", name="Oleskelulupa").click()
         await page.wait_for_timeout(1500)
 
-        print("Step 2: Permanent residence...")
+        print("Step 2...")
         await page.locator("[ng-model='entitySelections.service.value']").click()
-        await page.get_by_role("option", name=re.compile("5[.]", re.IGNORECASE)).click()
+        await page.get_by_role("option", name="5").click()
         await page.wait_for_timeout(1500)
 
-        print("Step 3: Helsinki office...")
+        print("Step 3...")
         await page.locator("[data-ng-model='entitySelections.locality.value']").click()
-        await page.get_by_role("option", name=re.compile("Helsinki.*Malmi", re.IGNORECASE)).click()
+        await page.get_by_role("option", name="Helsinki (Malmi)").click()
         await page.wait_for_timeout(1500)
 
         print("Step 4: Searching...")
         await page.locator("[data-ng-click='searchDesktop()']").click()
 
-        await page.wait_for_timeout(15000)
+        # ✅ WAIT FOR API TRAFFIC
+        await page.wait_for_timeout(20000)
 
         await browser.close()
 
+    # ✅ deduplicate
     unique = list({
         (s['date'], s['time']): s
         for s in collected_slots
@@ -98,40 +122,27 @@ async def main():
     checked_at = datetime.now().strftime("%d %b %Y at %H:%M UTC")
     print(f"Checking at {checked_at}, deadline {DEADLINE_DATE}")
 
-    try:
-        all_slots = await get_all_slots()
+    all_slots = await get_all_slots()
 
-        print(f"\nTotal slots: {len(all_slots)}")
+    print(f"\nTotal slots: {len(all_slots)}")
 
-        early = sorted(
-            [s for s in all_slots if s['date'] <= DEADLINE],
-            key=lambda s: (s['date'], s['time'])
+    early = sorted(
+        [s for s in all_slots if s['date'] <= DEADLINE],
+        key=lambda s: (s['date'], s['time'])
+    )
+
+    if early:
+        lines = "\n".join(
+            f"- {s['date']} at {s['time']}"
+            for s in early[:5]
         )
 
-        if early:
-            lines = "\n".join(
-                f"- {s['date'].strftime('%a %d.%m.%Y')} at {s['time']}"
-                for s in early[:5]
-            )
+        telegram(f"MIGRI SLOT FOUND!\n\n{lines}")
+        print("✅ ALERT sent")
 
-            message = (
-                f"MIGRI SLOT FOUND!\n\n"
-                f"{len(early)} slot(s) before {DEADLINE_DATE}:\n"
-                f"{lines}\n\n"
-                f"Checked: {checked_at}"
-            )
-
-            telegram(message)
-            print("✅ ALERT sent")
-
-        else:
-            telegram(f"No slots found\nChecked: {checked_at}")
-            print("❌ No slots found")
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        telegram(f"Error:\n{str(e)[:300]}")
+    else:
+        telegram("No slots found")
+        print("❌ No slots found")
 
 
 asyncio.run(main())
