@@ -38,13 +38,11 @@ async def get_all_slots():
             try:
                 url = response.url
 
-                # ✅ THIS is the REAL endpoint from your logs
                 if "api/upcoming/services" in url:
                     data = await response.json()
 
                     for item in data:
                         try:
-                            # ✅ confirmed fields usually exist here
                             start = item.get("start")
                             if not start:
                                 continue
@@ -91,12 +89,10 @@ async def get_all_slots():
         print("Step 4: Searching...")
         await page.locator("[data-ng-click='searchDesktop()']").click()
 
-        # ✅ give time for API to return slots
         await page.wait_for_timeout(15000)
 
         await browser.close()
 
-    # ✅ remove duplicates
     unique = list({
         (s["date"], s["time"]): s
         for s in slots
@@ -146,4 +142,3 @@ async def main():
 
 
 asyncio.run(main())
-``
