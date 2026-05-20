@@ -142,26 +142,13 @@ async def get_slots():
                 print(f"Reached past deadline, stopping.")
                 break
 
-            # Click next week button
-            next_btn = page.locator(
-                "[data-ng-click*='next'], [ng-click*='next'], "
-                "button[class*='next'], [aria-label*='next'], "
-                "[aria-label*='seuraava'], button:has-text('>')"
-            )
-            if await next_btn.count() > 0:
-                await next_btn.first.click()
-                print(f"Clicked next week")
-                await page.wait_for_timeout(2000)
-            else:
-                # Try clicking the week number tabs (vk 30, vk 31 etc)
-                week_tabs = await page.locator("[data-ng-click*='week'], [ng-click*='week'], .week-tab, [class*='week']").all()
-                print(f"Week tabs found: {len(week_tabs)}")
-                if week_tabs and week_num < len(week_tabs) - 1:
-                    await week_tabs[week_num + 1].click()
-                    await page.wait_for_timeout(2000)
-                else:
-                    print("No next button found, stopping")
-                    break
+            # Click next week button - use desktop version (not mobile)
+            next_btn = page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])")
+            if await next_btn.count() == 0:
+                next_btn = page.locator("[data-ng-click='nextWeek()']").first
+            await next_btn.click()
+            print(f"Clicked next week")
+            await page.wait_for_timeout(2000)
 
         await browser.close()
     return all_slots
