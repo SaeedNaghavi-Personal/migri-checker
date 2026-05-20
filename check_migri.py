@@ -26,37 +26,58 @@ def telegram(message):
         print(f"[telegram] error: {e}")
 
 
-async def extract_slots_by_clicking_days(page, week_dates_raw):
+async def extract_slots_for_week(page, week_dates_raw):
     """
-    Correct approach: click each day tab and extract only that day's times.
+    Click each weekday tab + time-of-day tabs, then extract times.
     """
     slots = []
 
-    # These match Mon Tue Wed ... in UI (based on your screenshots)
-    day_buttons = page.locator("text=/Mon|Tue|Wed|Thu|Fri|Sat|Sun/")
+    # ✅ Find day buttons by pattern like "10/08"
+    day_buttons = page.locator("button").filter(
+        has_text=re.compile(r"\d{1,2}/\d{2}")
+    )
+
     count = await day_buttons.count()
+    print(f"Found {count} day buttons")
+
+    if count == 0:
+        print("⚠️ No day buttons detected — UI selector failed")
+        return slots
 
     for i in range(min(7, count)):
         try:
             date_str = week_dates_raw[i]
             dt = datetime.strptime(f"{date_str}.{YEAR}", "%d.%m.%Y").date()
 
-            # Click day
+            # ✅ Click the day
             await day_buttons.nth(i).click()
             await page.wait_for_timeout(1500)
 
-            text = await page.inner_text("body")
+            print(f" Clicking day {date_str}")
 
-            # Extract times
+            # ✅ Click all time-of-day tabs
+            tabs = ["Morning", "Day", "Afternoon", "Evening"]
+
+            for tab in tabs:
+                try:
+                    tab_btn = page.get_by_text(tab)
+                    if await tab_btn.count() > 0:
+                        await tab_btn.first.click()
+                        await page.wait_for_timeout(800)
+                except:
+                    pass
+
+            # ✅ Extract times
+            text = await page.inner_text("body")
             times = re.findall(r'\b\d{1,2}:\d{2}\b', text)
 
-            print(f" Day {date_str}: {len(times)} slots")
+            print(f"  → Found {len(times)} slots")
 
             for t in times:
                 slots.append({
-                    'date': dt,
-                    'time': t,
-                    'office': 'Helsinki (Malmi)'
+                    "date": dt,
+                    "time": t,
+                    "office": "Helsinki (Malmi)"
                 })
 
         except Exception as e:
@@ -73,14 +94,14 @@ async def get_all_slots():
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
 
-        page = await browser.new_page(
+        page = await pw.chromium.new_page(
             locale="fi-FI",
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         )
 
         print("Loading Migri...")
         await page.goto(MIGRI_URL, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(4000)
 
         print("Step 1: Residence permit...")
         await page.locator("[ng-model='entitySelections.category.value']").click()
@@ -100,7 +121,7 @@ async def get_all_slots():
         print("Step 4: Searching...")
         await page.locator("[data-ng-click='searchDesktop()']").click()
 
-        # IMPORTANT: allow Angular UI to load
+        # ✅ IMPORTANT: wait for calendar
         await page.wait_for_timeout(10000)
 
         for week_num in range(15):
@@ -108,9 +129,9 @@ async def get_all_slots():
             page_text = await page.inner_text("body")
             week_dates_raw = re.findall(r'\b(\d{1,2}\.\d{2})\.', page_text)
 
-            print(f"\nWeek {week_num+1}: {week_dates_raw[:7]}")
+            print(f"\nWeek {week_num + 1}: {week_dates_raw[:7]}")
 
-            # Stop after deadline
+            # ✅ Stop after deadline
             past_deadline = True
             for d in week_dates_raw[:7]:
                 try:
@@ -121,23 +142,22 @@ async def get_all_slots():
                 except:
                     pass
 
-            # ✅ KEY FIX: click each day
-            week_slots = await extract_slots_by_clicking_days(page, week_dates_raw)
-
+            # ✅ Extract slots
+            week_slots = await extract_slots_for_week(page, week_dates_raw)
             all_slots.extend(week_slots)
 
             if past_deadline and week_dates_raw:
                 print("Reached past deadline, stopping.")
                 break
 
-            # Next week
+            # ✅ Next week
             await page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])").first.click()
             print("Clicked next week")
             await page.wait_for_timeout(3000)
 
         await browser.close()
 
-    # Remove duplicates
+    # ✅ Remove duplicates
     unique = list({
         (s['date'], s['time']): s
         for s in all_slots
@@ -183,7 +203,7 @@ async def main():
             )
 
             telegram(msg)
-            print(f"ALERT: {len(early)} early slots!")
+            print(f"✅ ALERT sent ({len(early)} early slots)")
 
         elif later:
             earliest = later[0]
@@ -201,7 +221,7 @@ async def main():
 
         else:
             telegram(f"Migri checked - no appointments visible\nChecked: {checked_at}")
-            print("No slots found at all")
+            print("❌ No slots found at all")
 
     except Exception as e:
         import traceback
