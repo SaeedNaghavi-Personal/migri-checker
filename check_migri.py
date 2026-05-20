@@ -61,6 +61,8 @@ def parse_week(text):
     # Split into per-day chunks using "Ei aikoja" as separator for empty days
     # and "Lisää" as separator between days with times
     day_chunks = re.split(r'Ei aikoja|Lisää\s*▼?', times_section)
+    # First chunk is always office address info, skip it
+    day_chunks = day_chunks[1:]
 
     print(f"  Week dates: {dates}")
     print(f"  Day chunks count: {len(day_chunks)}")
