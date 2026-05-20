@@ -66,7 +66,7 @@ def parse_week(text):
     print(f"  Day chunks count: {len(day_chunks)}")
 
     for i, (date, chunk) in enumerate(zip(dates, day_chunks)):
-        times = re.findall(r'\b(\d{1,2}:\d{2})\b', chunk)
+        times = list(dict.fromkeys(re.findall(r'\b(\d{1,2}:\d{2})\b', chunk)))  # deduplicate
         for t in times:
             slots.append({'date': date, 'time': t, 'office': 'Helsinki (Malmi)'})
             print(f"  Found: {date} {t}")
