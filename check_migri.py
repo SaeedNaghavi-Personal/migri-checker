@@ -27,12 +27,8 @@ def telegram(message):
 
 
 async def extract_slots_for_week(page, week_dates_raw):
-    """
-    Click each weekday tab + time-of-day tabs, then extract times.
-    """
     slots = []
 
-    # ✅ Find day buttons by pattern like "10/08"
     day_buttons = page.locator("button").filter(
         has_text=re.compile(r"\d{1,2}/\d{2}")
     )
@@ -41,7 +37,7 @@ async def extract_slots_for_week(page, week_dates_raw):
     print(f"Found {count} day buttons")
 
     if count == 0:
-        print("⚠️ No day buttons detected — UI selector failed")
+        print("⚠️ No day buttons detected")
         return slots
 
     for i in range(min(7, count)):
@@ -49,13 +45,11 @@ async def extract_slots_for_week(page, week_dates_raw):
             date_str = week_dates_raw[i]
             dt = datetime.strptime(f"{date_str}.{YEAR}", "%d.%m.%Y").date()
 
-            # ✅ Click the day
             await day_buttons.nth(i).click()
             await page.wait_for_timeout(1500)
 
             print(f" Clicking day {date_str}")
 
-            # ✅ Click all time-of-day tabs
             tabs = ["Morning", "Day", "Afternoon", "Evening"]
 
             for tab in tabs:
@@ -67,7 +61,6 @@ async def extract_slots_for_week(page, week_dates_raw):
                 except:
                     pass
 
-            # ✅ Extract times
             text = await page.inner_text("body")
             times = re.findall(r'\b\d{1,2}:\d{2}\b', text)
 
@@ -94,7 +87,8 @@ async def get_all_slots():
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
 
-        page = await pw.chromium.new_page(
+        # ✅ ✅ FIXED HERE
+        page = await browser.new_page(
             locale="fi-FI",
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
         )
@@ -121,7 +115,6 @@ async def get_all_slots():
         print("Step 4: Searching...")
         await page.locator("[data-ng-click='searchDesktop()']").click()
 
-        # ✅ IMPORTANT: wait for calendar
         await page.wait_for_timeout(10000)
 
         for week_num in range(15):
@@ -131,7 +124,6 @@ async def get_all_slots():
 
             print(f"\nWeek {week_num + 1}: {week_dates_raw[:7]}")
 
-            # ✅ Stop after deadline
             past_deadline = True
             for d in week_dates_raw[:7]:
                 try:
@@ -142,7 +134,6 @@ async def get_all_slots():
                 except:
                     pass
 
-            # ✅ Extract slots
             week_slots = await extract_slots_for_week(page, week_dates_raw)
             all_slots.extend(week_slots)
 
@@ -150,14 +141,12 @@ async def get_all_slots():
                 print("Reached past deadline, stopping.")
                 break
 
-            # ✅ Next week
             await page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])").first.click()
             print("Clicked next week")
             await page.wait_for_timeout(3000)
 
         await browser.close()
 
-    # ✅ Remove duplicates
     unique = list({
         (s['date'], s['time']): s
         for s in all_slots
@@ -195,11 +184,8 @@ async def main():
 
             msg = (
                 f"MIGRI SLOT FOUND!\n\n"
-                f"Helsinki (Malmi) - Permanent Residence\n\n"
                 f"{len(early)} slot(s) before {DEADLINE_DATE}:\n"
-                f"{lines}\n\n"
-                f"Book now: migri.vihta.com\n"
-                f"Checked: {checked_at}"
+                f"{lines}"
             )
 
             telegram(msg)
@@ -209,24 +195,21 @@ async def main():
             earliest = later[0]
 
             msg = (
-                f"Migri checked - no slots before {DEADLINE_DATE}\n\n"
-                f"Earliest available:\n"
-                f"{earliest['date'].strftime('%A %d.%m.%Y')} at {earliest['time']}\n"
-                f"Office: Helsinki (Malmi)\n\n"
-                f"Checked: {checked_at}"
+                f"No early slots.\n"
+                f"Earliest: {earliest['date']} {earliest['time']}"
             )
 
             telegram(msg)
             print(f"No early slots. Earliest: {earliest['date']} {earliest['time']}")
 
         else:
-            telegram(f"Migri checked - no appointments visible\nChecked: {checked_at}")
+            telegram("No appointments visible")
             print("❌ No slots found at all")
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        telegram(f"Migri checker error:\n{str(e)[:300]}")
+        telegram(f"Error:\n{str(e)[:300]}")
 
 
 asyncio.run(main())
