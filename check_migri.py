@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from datetime import datetime
 import requests
 
@@ -27,7 +28,7 @@ def telegram(message):
 async def get_all_slots():
     from playwright.async_api import async_playwright
 
-    collected_slots = []
+    slots = []
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -37,47 +38,30 @@ async def get_all_slots():
             try:
                 url = response.url
 
-                # ✅ DEBUG: print all API calls once
-                if "vihta" in url:
-                    print("API URL:", url)
+                # ✅ THIS is the REAL endpoint from your logs
+                if "api/upcoming/services" in url:
+                    data = await response.json()
 
-                # ✅ TARGET: reservation API (this is the real one)
-                if "reservation" in url.lower() and response.request.resource_type == "xhr":
-                    try:
-                        data = await response.json()
-                    except:
-                        return
+                    for item in data:
+                        try:
+                            # ✅ confirmed fields usually exist here
+                            start = item.get("start")
+                            if not start:
+                                continue
 
-                    # ✅ extract slots safely
-                    def find_slots(obj):
-                        if isinstance(obj, dict):
-                            for k, v in obj.items():
-                                if k.lower() in ["date", "starttime", "time"]:
-                                    print("DEBUG FIELD:", k, v)
-                                find_slots(v)
-                        elif isinstance(obj, list):
-                            for item in obj:
-                                find_slots(item)
+                            dt_obj = datetime.fromisoformat(start)
+                            dt = dt_obj.date()
+                            time_str = dt_obj.strftime("%H:%M")
 
-                    find_slots(data)
+                            slots.append({
+                                "date": dt,
+                                "time": time_str
+                            })
 
-                    # ✅ generic extraction
-                    import re
-                    dates = re.findall(r"\d{4}-\d{2}-\d{2}", str(data))
-                    times = re.findall(r"\d{2}:\d{2}", str(data))
+                        except Exception:
+                            pass
 
-                    for d in dates:
-                        for t in times:
-                            try:
-                                dt = datetime.strptime(d, "%Y-%m-%d").date()
-                                collected_slots.append({
-                                    "date": dt,
-                                    "time": t
-                                })
-                            except:
-                                pass
-
-            except:
+            except Exception:
                 pass
 
         page.on("response", handle_response)
@@ -86,33 +70,36 @@ async def get_all_slots():
         await page.goto(MIGRI_URL, wait_until="networkidle", timeout=60000)
         await page.wait_for_timeout(4000)
 
-        print("Step 1...")
+        print("Step 1: Residence permit...")
         await page.locator("[ng-model='entitySelections.category.value']").click()
         await page.get_by_role("option", name="Oleskelulupa").click()
         await page.wait_for_timeout(1500)
 
-        print("Step 2...")
+        print("Step 2: Permanent residence...")
         await page.locator("[ng-model='entitySelections.service.value']").click()
-        await page.get_by_role("option", name="5").click()
+        await page.get_by_role("option", name=re.compile("5", re.IGNORECASE)).click()
         await page.wait_for_timeout(1500)
 
-        print("Step 3...")
+        print("Step 3: Helsinki office...")
         await page.locator("[data-ng-model='entitySelections.locality.value']").click()
-        await page.get_by_role("option", name="Helsinki (Malmi)").click()
+        await page.get_by_role(
+            "option",
+            name=re.compile("Helsinki.*Malmi", re.IGNORECASE)
+        ).click()
         await page.wait_for_timeout(1500)
 
         print("Step 4: Searching...")
         await page.locator("[data-ng-click='searchDesktop()']").click()
 
-        # ✅ WAIT FOR API TRAFFIC
-        await page.wait_for_timeout(20000)
+        # ✅ give time for API to return slots
+        await page.wait_for_timeout(15000)
 
         await browser.close()
 
-    # ✅ deduplicate
+    # ✅ remove duplicates
     unique = list({
-        (s['date'], s['time']): s
-        for s in collected_slots
+        (s["date"], s["time"]): s
+        for s in slots
     }.values())
 
     return unique
@@ -122,27 +109,41 @@ async def main():
     checked_at = datetime.now().strftime("%d %b %Y at %H:%M UTC")
     print(f"Checking at {checked_at}, deadline {DEADLINE_DATE}")
 
-    all_slots = await get_all_slots()
+    try:
+        all_slots = await get_all_slots()
 
-    print(f"\nTotal slots: {len(all_slots)}")
+        print(f"\nTotal slots: {len(all_slots)}")
 
-    early = sorted(
-        [s for s in all_slots if s['date'] <= DEADLINE],
-        key=lambda s: (s['date'], s['time'])
-    )
-
-    if early:
-        lines = "\n".join(
-            f"- {s['date']} at {s['time']}"
-            for s in early[:5]
+        early = sorted(
+            [s for s in all_slots if s["date"] <= DEADLINE],
+            key=lambda s: (s["date"], s["time"])
         )
 
-        telegram(f"MIGRI SLOT FOUND!\n\n{lines}")
-        print("✅ ALERT sent")
+        if early:
+            lines = "\n".join(
+                f"- {s['date'].strftime('%a %d.%m.%Y')} at {s['time']}"
+                for s in early[:5]
+            )
 
-    else:
-        telegram("No slots found")
-        print("❌ No slots found")
+            msg = (
+                f"MIGRI SLOT FOUND!\n\n"
+                f"{len(early)} slot(s) before {DEADLINE_DATE}:\n"
+                f"{lines}\n\n"
+                f"Checked: {checked_at}"
+            )
+
+            telegram(msg)
+            print("✅ ALERT sent")
+
+        else:
+            telegram(f"No slots found\nChecked: {checked_at}")
+            print("❌ No slots found")
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        telegram(f"Error:\n{str(e)[:300]}")
 
 
 asyncio.run(main())
+``
