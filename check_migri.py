@@ -1,18 +1,27 @@
 import asyncio
 import re
 import os
-from datetime import datetime
+from datetime import datetime, UTC
 import requests
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT = os.environ["TELEGRAM_CHAT"]
 
 DEADLINE_DATE = "2026-08-12"
+
 MIGRI_URL = "https://migri.vihta.com/public/migri/#/reservation"
 
-DEADLINE = datetime.strptime(DEADLINE_DATE, "%Y-%m-%d").date()
+DEADLINE = datetime.strptime(
+    DEADLINE_DATE,
+    "%Y-%m-%d"
+).date()
+
 YEAR = datetime.now().year
 
+
+# =========================================================
+# TELEGRAM
+# =========================================================
 
 def telegram(message):
     try:
@@ -24,33 +33,47 @@ def telegram(message):
             },
             timeout=15,
         )
+
         print(f"[telegram] status={r.status_code}")
+
     except Exception as e:
         print(f"[telegram] error: {e}")
 
 
-async def get_week_slots(page):
-    """
-    Much more tolerant slot extraction.
+# =========================================================
+# SLOT EXTRACTION
+# =========================================================
 
-    Instead of depending on exact DOM structure,
-    we search nearby text for HH:MM patterns.
-    """
+async def get_week_slots(page):
 
     slots = await page.evaluate(f"""
     () => {{
+
         const results = [];
         const year = {YEAR};
 
-        // Find all visible date labels like 10.08.
-        const all = [...document.querySelectorAll('*')];
+        // -------------------------------------------------
+        // Find visible date headers
+        // -------------------------------------------------
 
-        const dateHeaders = all.filter(el => {{
+        const allEls = [...document.querySelectorAll('*')];
+
+        const dateHeaders = allEls.filter(el => {{
+
             const txt = el.innerText?.trim() || '';
-            return /^\\d{{1,2}}\\.\\d{{2}}\\.$/.test(txt);
+
+            return (
+                /^\\d{{1,2}}\\.\\d{{2}}\\.$/.test(txt)
+                &&
+                el.offsetParent !== null
+            );
         }});
 
-        console.log("Date headers:", dateHeaders.length);
+        console.log("DATE HEADERS FOUND:", dateHeaders.length);
+
+        // -------------------------------------------------
+        // Process each date column
+        // -------------------------------------------------
 
         for (const dateEl of dateHeaders) {{
 
@@ -60,44 +83,98 @@ async def get_week_slots(page):
                 .replace(/\\.$/, '')
                 .split('.');
 
-            if (parts.length < 2) continue;
+            if (parts.length < 2)
+                continue;
 
-            const day = parts[0];
-            const month = parts[1];
+            const day = parseInt(parts[0]);
+            const month = parseInt(parts[1]);
 
             const fullDate =
-                `${{year}}-${{String(month).padStart(2, '0')}}-${{String(day).padStart(2, '0')}}`;
+                `${{year}}-${{String(month).padStart(2,'0')}}-${{String(day).padStart(2,'0')}}`;
 
-            // Walk upward and scan nearby text
-            let parent = dateEl.parentElement;
+            console.log("CHECKING DATE:", fullDate);
 
-            for (let level = 0; level < 8 && parent; level++) {{
+            // ---------------------------------------------
+            // Walk upward to find the correct day column
+            // ---------------------------------------------
 
-                const txt = parent.innerText || '';
+            let column = dateEl;
 
-                // Find ALL HH:MM occurrences
-                const matches = [...txt.matchAll(/\\b\\d{{1,2}}:\\d{{2}}\\b/g)];
+            for (let level = 0; level < 6; level++) {{
 
-                for (const match of matches) {{
-                    results.push({{
-                        date: fullDate,
-                        time: match[0]
-                    }});
+                if (!column.parentElement)
+                    break;
+
+                column = column.parentElement;
+
+                // Get all buttons and links
+                const buttons = [
+                    ...column.querySelectorAll('button, a')
+                ];
+
+                // Extract ONLY exact HH:MM text
+                const times = buttons
+                    .map(btn => btn.innerText?.trim() || '')
+                    .filter(txt =>
+                        /^\\d{{1,2}}:\\d{{2}}$/.test(txt)
+                    );
+
+                // Count date labels inside this container
+                const datesInside = [
+                    ...column.querySelectorAll('*')
+                ].filter(el => {{
+
+                    const txt = el.innerText?.trim() || '';
+
+                    return /^\\d{{1,2}}\\.\\d{{2}}\\.$/.test(txt);
+                }});
+
+                // -----------------------------------------
+                // GOOD COLUMN FOUND
+                // -----------------------------------------
+
+                if (
+                    times.length > 0
+                    &&
+                    datesInside.length <= 1
+                ) {{
+
+                    const uniqueTimes = [...new Set(times)];
+
+                    console.log(
+                        "FOUND COLUMN:",
+                        fullDate,
+                        uniqueTimes
+                    );
+
+                    for (const t of uniqueTimes) {{
+
+                        results.push({{
+                            date: fullDate,
+                            time: t
+                        }});
+                    }}
+
+                    break;
                 }}
-
-                parent = parent.parentElement;
             }}
         }}
 
+        // -------------------------------------------------
         // Remove duplicates
+        // -------------------------------------------------
+
         const unique = results.filter(
             (v, i, a) =>
                 a.findIndex(
-                    t => t.date === v.date && t.time === v.time
+                    t =>
+                        t.date === v.date
+                        &&
+                        t.time === v.time
                 ) === i
         );
 
-        console.log("Found slots:", unique);
+        console.log("FINAL UNIQUE SLOTS:", unique);
 
         return unique;
     }}
@@ -106,7 +183,12 @@ async def get_week_slots(page):
     return slots
 
 
+# =========================================================
+# MAIN SCRAPER
+# =========================================================
+
 async def get_all_slots():
+
     from playwright.async_api import async_playwright
 
     all_slots = []
@@ -123,7 +205,10 @@ async def get_all_slots():
         )
 
         page = await browser.new_page(
-            viewport={"width": 1600, "height": 1200},
+            viewport={
+                "width": 1600,
+                "height": 1200
+            },
             locale="fi-FI",
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -131,6 +216,10 @@ async def get_all_slots():
                 "Chrome/124.0 Safari/537.36"
             )
         )
+
+        # -------------------------------------------------
+        # LOAD PAGE
+        # -------------------------------------------------
 
         print("Loading Migri...")
 
@@ -142,15 +231,14 @@ async def get_all_slots():
 
         await page.wait_for_timeout(5000)
 
-        # Optional screenshot for debugging
         await page.screenshot(
-            path="migri_loaded.png",
+            path="01_loaded.png",
             full_page=True
         )
 
-        # ---------------------------------------------------
+        # -------------------------------------------------
         # STEP 1
-        # ---------------------------------------------------
+        # -------------------------------------------------
 
         print("Step 1: Residence permit...")
 
@@ -165,11 +253,11 @@ async def get_all_slots():
             name="Oleskelulupa"
         ).click()
 
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(2500)
 
-        # ---------------------------------------------------
+        # -------------------------------------------------
         # STEP 2
-        # ---------------------------------------------------
+        # -------------------------------------------------
 
         print("Step 2: Permanent residence...")
 
@@ -186,9 +274,9 @@ async def get_all_slots():
 
         await page.wait_for_timeout(2500)
 
-        # ---------------------------------------------------
+        # -------------------------------------------------
         # STEP 3
-        # ---------------------------------------------------
+        # -------------------------------------------------
 
         print("Step 3: Helsinki office...")
 
@@ -200,14 +288,17 @@ async def get_all_slots():
 
         await page.get_by_role(
             "option",
-            name=re.compile(r"Helsinki.*Malmi", re.IGNORECASE)
+            name=re.compile(
+                r"Helsinki.*Malmi",
+                re.IGNORECASE
+            )
         ).click()
 
         await page.wait_for_timeout(2500)
 
-        # ---------------------------------------------------
+        # -------------------------------------------------
         # SEARCH
-        # ---------------------------------------------------
+        # -------------------------------------------------
 
         print("Step 4: Searching...")
 
@@ -217,45 +308,70 @@ async def get_all_slots():
 
         await page.wait_for_timeout(8000)
 
-        # Debug screenshot after search
         await page.screenshot(
-            path="migri_search_results.png",
+            path="02_search_results.png",
             full_page=True
         )
 
-        # ---------------------------------------------------
+        # =================================================
         # WEEKS LOOP
-        # ---------------------------------------------------
+        # =================================================
 
         for week_num in range(20):
 
-            print(f"\n===== WEEK {week_num + 1} =====")
+            print(f"\\n===== WEEK {week_num + 1} =====")
+
+            # ---------------------------------------------
+            # DEBUG HTML
+            # ---------------------------------------------
+
+            html = await page.content()
+
+            with open(
+                f"debug_week_{week_num+1}.html",
+                "w",
+                encoding="utf-8"
+            ) as f:
+                f.write(html)
+
+            # ---------------------------------------------
+            # PAGE TEXT
+            # ---------------------------------------------
 
             page_text = await page.inner_text("body")
 
             week_dates = re.findall(
-                r'\\b(\\d{1,2}\\.\\d{2})\\.\\s',
+                r'(\\d{1,2}\\.\\d{2})\\.',
                 page_text
             )
 
             print("Visible dates:", week_dates[:7])
 
-            # ------------------------------------------------
-            # GET SLOTS
-            # ------------------------------------------------
+            # ---------------------------------------------
+            # EXTRACT SLOTS
+            # ---------------------------------------------
 
             week_slots = await get_week_slots(page)
 
-            print(f"Slots detected this week: {len(week_slots)}")
+            print(
+                f"Slots detected this week: "
+                f"{len(week_slots)}"
+            )
 
             for s in week_slots:
+
                 try:
+
                     dt = datetime.strptime(
                         s["date"],
                         "%Y-%m-%d"
                     ).date()
 
-                    print(f"  FOUND: {dt} {s['time']}")
+                    print(
+                        f"  FOUND: "
+                        f"{s['date']} "
+                        f"{s['time']}"
+                    )
 
                     all_slots.append({
                         "date": dt,
@@ -264,34 +380,42 @@ async def get_all_slots():
                     })
 
                 except Exception as e:
+
                     print("Parse error:", e)
 
-            # ------------------------------------------------
-            # STOP AFTER DEADLINE
-            # ------------------------------------------------
+            # ---------------------------------------------
+            # DEADLINE CHECK
+            # ---------------------------------------------
 
-            stop = False
+            if week_dates:
 
-            for d in week_dates[:7]:
                 try:
-                    dt = datetime.strptime(
-                        f"{d}.{YEAR}",
-                        "%d.%m.%Y"
-                    ).date()
 
-                    if dt > DEADLINE:
-                        stop = True
+                    latest_visible = max([
+                        datetime.strptime(
+                            f"{d}.{YEAR}",
+                            "%d.%m.%Y"
+                        ).date()
+                        for d in week_dates[:7]
+                    ])
 
-                except:
-                    pass
+                    print(
+                        "Latest visible:",
+                        latest_visible
+                    )
 
-            if stop:
-                print("Reached past deadline.")
-                break
+                    if latest_visible > DEADLINE:
+                        print(
+                            "Reached past deadline."
+                        )
+                        break
 
-            # ------------------------------------------------
+                except Exception as e:
+                    print("Deadline parse error:", e)
+
+            # ---------------------------------------------
             # NEXT WEEK
-            # ------------------------------------------------
+            # ---------------------------------------------
 
             next_btn = page.locator(
                 "[data-ng-click='nextWeek()']:not([id*='mobile'])"
@@ -308,9 +432,13 @@ async def get_all_slots():
     return all_slots
 
 
+# =========================================================
+# MAIN
+# =========================================================
+
 async def main():
 
-    checked_at = datetime.utcnow().strftime(
+    checked_at = datetime.now(UTC).strftime(
         "%d %b %Y at %H:%M UTC"
     )
 
@@ -323,23 +451,46 @@ async def main():
 
         all_slots = await get_all_slots()
 
-        print(f"\nTOTAL SLOTS FOUND: {len(all_slots)}")
+        print(
+            f"\\nTOTAL RAW SLOTS: "
+            f"{len(all_slots)}"
+        )
 
-        # Remove duplicates
+        # -------------------------------------------------
+        # REMOVE DUPLICATES
+        # -------------------------------------------------
+
         unique = []
         seen = set()
 
         for s in all_slots:
-            key = (s["date"], s["time"])
+
+            key = (
+                s["date"],
+                s["time"]
+            )
 
             if key not in seen:
+
                 seen.add(key)
                 unique.append(s)
 
         all_slots = sorted(
             unique,
-            key=lambda x: (x["date"], x["time"])
+            key=lambda s: (
+                s["date"],
+                s["time"]
+            )
         )
+
+        print(
+            f"TOTAL UNIQUE SLOTS: "
+            f"{len(all_slots)}"
+        )
+
+        # -------------------------------------------------
+        # SPLIT EARLY/LATE
+        # -------------------------------------------------
 
         early = [
             s for s in all_slots
@@ -351,27 +502,33 @@ async def main():
             if s["date"] > DEADLINE
         ]
 
-        print(f"Before deadline: {len(early)}")
-        print(f"After deadline: {len(later)}")
+        print(
+            f"Before deadline: {len(early)}"
+        )
 
-        # ---------------------------------------------------
-        # FOUND BEFORE DEADLINE
-        # ---------------------------------------------------
+        print(
+            f"After deadline: {len(later)}"
+        )
+
+        # -------------------------------------------------
+        # EARLY SLOTS FOUND
+        # -------------------------------------------------
 
         if early:
 
-            lines = "\n".join(
+            lines = "\\n".join(
                 f"- {s['date'].strftime('%a %d.%m.%Y')} at {s['time']}"
                 for s in early[:10]
             )
 
             msg = (
-                f"MIGRI SLOT FOUND!\n\n"
-                f"Helsinki (Malmi)\n\n"
-                f"{len(early)} slot(s) before {DEADLINE_DATE}:\n\n"
-                f"{lines}\n\n"
-                f"Book now:\n"
-                f"migri.vihta.com\n\n"
+                f"MIGRI SLOT FOUND!\\n\\n"
+                f"Helsinki (Malmi)\\n\\n"
+                f"{len(early)} slot(s) before "
+                f"{DEADLINE_DATE}:\\n\\n"
+                f"{lines}\\n\\n"
+                f"Book now:\\n"
+                f"migri.vihta.com\\n\\n"
                 f"Checked: {checked_at}"
             )
 
@@ -379,19 +536,20 @@ async def main():
 
             print("ALERT SENT")
 
-        # ---------------------------------------------------
+        # -------------------------------------------------
         # ONLY LATER SLOTS
-        # ---------------------------------------------------
+        # -------------------------------------------------
 
         elif later:
 
             earliest = later[0]
 
             msg = (
-                f"No slots before {DEADLINE_DATE}\n\n"
-                f"Earliest available:\n"
+                f"No slots before "
+                f"{DEADLINE_DATE}\\n\\n"
+                f"Earliest available:\\n"
                 f"{earliest['date'].strftime('%A %d.%m.%Y')} "
-                f"at {earliest['time']}\n\n"
+                f"at {earliest['time']}\\n\\n"
                 f"Checked: {checked_at}"
             )
 
@@ -399,14 +557,14 @@ async def main():
 
             print("Only later slots found")
 
-        # ---------------------------------------------------
-        # NOTHING
-        # ---------------------------------------------------
+        # -------------------------------------------------
+        # NOTHING FOUND
+        # -------------------------------------------------
 
         else:
 
             telegram(
-                f"Migri checked - no appointments visible\n"
+                f"Migri checked - no appointments visible\\n"
                 f"Checked: {checked_at}"
             )
 
@@ -419,10 +577,14 @@ async def main():
         traceback.print_exc()
 
         telegram(
-            f"Migri checker error:\n"
+            f"Migri checker error:\\n"
             f"{str(e)[:300]}"
         )
 
+
+# =========================================================
+# RUN
+# =========================================================
 
 if __name__ == "__main__":
     asyncio.run(main())
