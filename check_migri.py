@@ -4,20 +4,25 @@ import os
 from datetime import datetime
 import requests
 
-TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
-TELEGRAM_CHAT   = os.environ["TELEGRAM_CHAT"]
-DEADLINE_DATE   = "2026-08-12"
-MIGRI_URL       = "https://migri.vihta.com/public/migri/#/reservation"
-DEADLINE        = datetime.strptime(DEADLINE_DATE, "%Y-%m-%d").date()
-YEAR            = datetime.now().year
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_CHAT = os.environ["TELEGRAM_CHAT"]
+
+DEADLINE_DATE = "2026-08-12"
+MIGRI_URL = "https://migri.vihta.com/public/migri/#/reservation"
+
+DEADLINE = datetime.strptime(DEADLINE_DATE, "%Y-%m-%d").date()
+YEAR = datetime.now().year
 
 
 def telegram(message):
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT, "text": message},
-            timeout=10,
+            json={
+                "chat_id": TELEGRAM_CHAT,
+                "text": message
+            },
+            timeout=15,
         )
         print(f"[telegram] status={r.status_code}")
     except Exception as e:
@@ -26,66 +31,78 @@ def telegram(message):
 
 async def get_week_slots(page):
     """
-    Directly extracts slots by locating columns/headers or tracking structural index alignment.
-    This eliminates matching floating context dates outside the main timetable grid.
+    Much more tolerant slot extraction.
+
+    Instead of depending on exact DOM structure,
+    we search nearby text for HH:MM patterns.
     """
+
     slots = await page.evaluate(f"""
-        () => {{
-            const slots = [];
-            const year = {YEAR};
+    () => {{
+        const results = [];
+        const year = {YEAR};
 
-            // Locate the primary calendar wrapper element
-            const calendarGrid = document.querySelector('.desktop-grid, [role="grid"], table');
-            if (!calendarGrid) {{
-                console.log('JS: Core calendar grid element not rendered yet.');
-                return slots;
+        // Find all visible date labels like 10.08.
+        const all = [...document.querySelectorAll('*')];
+
+        const dateHeaders = all.filter(el => {{
+            const txt = el.innerText?.trim() || '';
+            return /^\\d{{1,2}}\\.\\d{{2}}\\.$/.test(txt);
+        }});
+
+        console.log("Date headers:", dateHeaders.length);
+
+        for (const dateEl of dateHeaders) {{
+
+            const dateText = dateEl.innerText.trim();
+
+            const parts = dateText
+                .replace(/\\.$/, '')
+                .split('.');
+
+            if (parts.length < 2) continue;
+
+            const day = parts[0];
+            const month = parts[1];
+
+            const fullDate =
+                `${{year}}-${{String(month).padStart(2, '0')}}-${{String(day).padStart(2, '0')}}`;
+
+            // Walk upward and scan nearby text
+            let parent = dateEl.parentElement;
+
+            for (let level = 0; level < 8 && parent; level++) {{
+
+                const txt = parent.innerText || '';
+
+                // Find ALL HH:MM occurrences
+                const matches = [...txt.matchAll(/\\b\\d{{1,2}}:\\d{{2}}\\b/g)];
+
+                for (const match of matches) {{
+                    results.push({{
+                        date: fullDate,
+                        time: match[0]
+                    }});
+                }}
+
+                parent = parent.parentElement;
             }}
-
-            // Find all potential active interactive time slots inside the main layout grid
-            const buttons = Array.from(calendarGrid.querySelectorAll('button, a'));
-            const timeButtons = buttons.filter(b => /^\\d{{1,2}}:\\d{{2}}$/.test(b.textContent?.trim()));
-
-            console.log('JS: Found ' + timeButtons.length + ' active time elements inside the grid block.');
-
-            timeButtons.forEach(btn => {{
-                const timeText = btn.textContent.trim();
-                
-                // 1. Check if the button contains a descriptive aria-label containing the date
-                const aria = btn.getAttribute('aria-label') || '';
-                const ariaMatch = aria.match(/(\\d{{1,2}})\\.(\\d{{2}})\\./);
-                if (ariaMatch) {{
-                    const day = String(ariaMatch[1]).padStart(2, '0');
-                    const month = String(ariaMatch[2]).padStart(2, '0');
-                    slots.push({{date: `${{year}}-${{month}}-${{day}}`, time: timeText}});
-                    return;
-                }}
-
-                // 2. Fallback: Crawl structural container parents inside the grid to map dates
-                let parent = btn.parentElement;
-                let foundDate = null;
-
-                for (let i = 0; i < 7; i++) {{
-                    if (!parent || parent === calendarGrid || parent === document.body) break;
-                    
-                    const text = parent.textContent || "";
-                    const dateMatch = text.match(/\\b(\\d{{1,2}})\\.(\\d{{2}})\\./);
-                    if (dateMatch) {{
-                        const day = String(dateMatch[1]).padStart(2, '0');
-                        const month = String(dateMatch[2]).padStart(2, '0');
-                        foundDate = year + '-' + month + '-' + day;
-                        break;
-                    }}
-                    parent = parent.parentElement;
-                }}
-
-                if (foundDate) {{
-                    slots.push({{date: foundDate, time: timeText}});
-                }}
-            }});
-
-            return slots;
         }}
+
+        // Remove duplicates
+        const unique = results.filter(
+            (v, i, a) =>
+                a.findIndex(
+                    t => t.date === v.date && t.time === v.time
+                ) === i
+        );
+
+        console.log("Found slots:", unique);
+
+        return unique;
+    }}
     """)
+
     return slots
 
 
@@ -95,163 +112,316 @@ async def get_all_slots():
     all_slots = []
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        page = await browser.new_page(
-            locale="fi-FI",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
+
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ]
         )
 
-        page.on("console", lambda msg: print(f"[Browser Console] {msg.text}"))
+        page = await browser.new_page(
+            viewport={"width": 1600, "height": 1200},
+            locale="fi-FI",
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            )
+        )
 
         print("Loading Migri...")
-        await page.goto(MIGRI_URL, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(3000)
+
+        await page.goto(
+            MIGRI_URL,
+            wait_until="networkidle",
+            timeout=90000
+        )
+
+        await page.wait_for_timeout(5000)
+
+        # Optional screenshot for debugging
+        await page.screenshot(
+            path="migri_loaded.png",
+            full_page=True
+        )
+
+        # ---------------------------------------------------
+        # STEP 1
+        # ---------------------------------------------------
 
         print("Step 1: Residence permit...")
-        await page.locator("[ng-model='entitySelections.category.value']").click()
-        await page.wait_for_timeout(500)
-        await page.get_by_role("option", name="Oleskelulupa").click()
-        await page.wait_for_timeout(1500)
+
+        await page.locator(
+            "[ng-model='entitySelections.category.value']"
+        ).click()
+
+        await page.wait_for_timeout(1000)
+
+        await page.get_by_role(
+            "option",
+            name="Oleskelulupa"
+        ).click()
+
+        await page.wait_for_timeout(2000)
+
+        # ---------------------------------------------------
+        # STEP 2
+        # ---------------------------------------------------
 
         print("Step 2: Permanent residence...")
-        await page.locator("[ng-model='entitySelections.service.value']").click()
-        await page.wait_for_timeout(500)
-        await page.get_by_role("option", name=re.compile("5[.]", re.IGNORECASE)).click()
-        await page.wait_for_timeout(1500)
+
+        await page.locator(
+            "[ng-model='entitySelections.service.value']"
+        ).click()
+
+        await page.wait_for_timeout(1000)
+
+        await page.get_by_role(
+            "option",
+            name=re.compile(r"5[.]", re.IGNORECASE)
+        ).click()
+
+        await page.wait_for_timeout(2500)
+
+        # ---------------------------------------------------
+        # STEP 3
+        # ---------------------------------------------------
 
         print("Step 3: Helsinki office...")
-        await page.locator("[data-ng-model='entitySelections.locality.value']").click()
-        await page.wait_for_timeout(500)
-        await page.get_by_role("option", name=re.compile("Helsinki.*Malmi", re.IGNORECASE)).click()
-        await page.wait_for_timeout(1500)
+
+        await page.locator(
+            "[data-ng-model='entitySelections.locality.value']"
+        ).click()
+
+        await page.wait_for_timeout(1000)
+
+        await page.get_by_role(
+            "option",
+            name=re.compile(r"Helsinki.*Malmi", re.IGNORECASE)
+        ).click()
+
+        await page.wait_for_timeout(2500)
+
+        # ---------------------------------------------------
+        # SEARCH
+        # ---------------------------------------------------
 
         print("Step 4: Searching...")
-        await page.locator("[data-ng-click='searchDesktop()']").click()
-        await page.wait_for_timeout(6000)
 
-        for week_num in range(15):
-            # Safe text extraction targeting the dynamic layout element context directly
-            page_html = await page.evaluate("() => document.body.textContent || ''")
-            week_dates_raw = re.findall(r'\b(\d{1,2}\.\d{2})\.', page_html)
-            week_dates_raw = list(dict.fromkeys(week_dates_raw))
+        await page.locator(
+            "[data-ng-click='searchDesktop()']"
+        ).click()
 
-            print(f"\n--- Week {week_num+1} Evaluation ---")
-            print(f"Detected Week Date Headers: {week_dates_raw[:7]}")
+        await page.wait_for_timeout(8000)
 
-            # Read raw active slots
-            week_slots = await get_week_slots(page)
-            
-            # Filter duplicates discovered on the current frame viewpoint
-            unique_week_slots = []
-            seen = set()
-            for s in week_slots:
-                key = (s['date'], s['time'])
-                if key not in seen:
-                    seen.add(key)
-                    unique_week_slots.append(s)
+        # Debug screenshot after search
+        await page.screenshot(
+            path="migri_search_results.png",
+            full_page=True
+        )
 
-            for s in unique_week_slots:
-                try:
-                    dt = datetime.strptime(s['date'], "%Y-%m-%d").date()
-                    print(f"  Verified Slot Found -> {s['date']} @ {s['time']}")
-                    all_slots.append({'date': dt, 'time': s['time'], 'office': 'Helsinki (Malmi)'})
-                except Exception as e:
-                    print(f"  Parsing Error: {e}")
+        # ---------------------------------------------------
+        # WEEKS LOOP
+        # ---------------------------------------------------
 
-            # Smart target condition checks
-            past_deadline = True
-            if unique_week_slots:
-                for s in unique_week_slots:
-                    dt = datetime.strptime(s['date'], "%Y-%m-%d").date()
-                    if dt <= DEADLINE:
-                        past_deadline = False
-                        break
-            else:
-                for d in week_dates_raw[:7]:
-                    try:
-                        dt = datetime.strptime(f"{d}.{YEAR}", "%d.%m.%Y").date()
-                        if dt <= DEADLINE:
-                            past_deadline = False
-                            break
-                    except Exception:
-                        pass
+        for week_num in range(20):
 
-            if past_deadline and (unique_week_slots or week_dates_raw):
-                print("All slots or dates analyzed in this frame exceed deadline threshold. Stopping.")
-                break
+            print(f"\n===== WEEK {week_num + 1} =====")
 
-            # Capture fingerprint using non-blocking pure JS evaluate to prevent Playwright auto-wait hangs
-            last_page_fingerprint = await page.evaluate(
-                "() => document.querySelector('.desktop-grid, [role=\"grid\"], table')?.textContent || ''"
+            page_text = await page.inner_text("body")
+
+            week_dates = re.findall(
+                r'\\b(\\d{1,2}\\.\\d{2})\\.\\s',
+                page_text
             )
 
-            # Navigate forward smoothly
-            next_button = page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])").first
-            await next_button.click()
-            print("Clicked next week pagination element.")
-            
-            # Rapid, instant polling loops using non-blocking JS checks
-            for attempt in range(10):
-                await page.wait_for_timeout(500)
-                current_fingerprint = await page.evaluate(
-                    "() => document.querySelector('.desktop-grid, [role=\"grid\"], table')?.textContent || ''"
-                )
-                if current_fingerprint != last_page_fingerprint:
-                    break
+            print("Visible dates:", week_dates[:7])
+
+            # ------------------------------------------------
+            # GET SLOTS
+            # ------------------------------------------------
+
+            week_slots = await get_week_slots(page)
+
+            print(f"Slots detected this week: {len(week_slots)}")
+
+            for s in week_slots:
+                try:
+                    dt = datetime.strptime(
+                        s["date"],
+                        "%Y-%m-%d"
+                    ).date()
+
+                    print(f"  FOUND: {dt} {s['time']}")
+
+                    all_slots.append({
+                        "date": dt,
+                        "time": s["time"],
+                        "office": "Helsinki (Malmi)"
+                    })
+
+                except Exception as e:
+                    print("Parse error:", e)
+
+            # ------------------------------------------------
+            # STOP AFTER DEADLINE
+            # ------------------------------------------------
+
+            stop = False
+
+            for d in week_dates[:7]:
+                try:
+                    dt = datetime.strptime(
+                        f"{d}.{YEAR}",
+                        "%d.%m.%Y"
+                    ).date()
+
+                    if dt > DEADLINE:
+                        stop = True
+
+                except:
+                    pass
+
+            if stop:
+                print("Reached past deadline.")
+                break
+
+            # ------------------------------------------------
+            # NEXT WEEK
+            # ------------------------------------------------
+
+            next_btn = page.locator(
+                "[data-ng-click='nextWeek()']:not([id*='mobile'])"
+            ).first
+
+            await next_btn.click()
+
+            print("Clicked next week")
+
+            await page.wait_for_timeout(3000)
 
         await browser.close()
+
     return all_slots
 
 
 async def main():
-    checked_at = datetime.now().strftime("%d %b %Y at %H:%M UTC")
-    print(f"Checking at {checked_at}, deadline {DEADLINE_DATE}")
+
+    checked_at = datetime.utcnow().strftime(
+        "%d %b %Y at %H:%M UTC"
+    )
+
+    print(
+        f"Checking at {checked_at}, "
+        f"deadline {DEADLINE_DATE}"
+    )
 
     try:
+
         all_slots = await get_all_slots()
-        print(f"\nExecution summary -> Total items tracked: {len(all_slots)}")
 
-        early = sorted([s for s in all_slots if s['date'] <= DEADLINE], key=lambda s: (s['date'], s['time']))
-        later = sorted([s for s in all_slots if s['date'] > DEADLINE], key=lambda s: (s['date'], s['time']))
+        print(f"\nTOTAL SLOTS FOUND: {len(all_slots)}")
 
-        print(f"Valid early matches: {len(early)} | Later matches: {len(later)}")
+        # Remove duplicates
+        unique = []
+        seen = set()
+
+        for s in all_slots:
+            key = (s["date"], s["time"])
+
+            if key not in seen:
+                seen.add(key)
+                unique.append(s)
+
+        all_slots = sorted(
+            unique,
+            key=lambda x: (x["date"], x["time"])
+        )
+
+        early = [
+            s for s in all_slots
+            if s["date"] <= DEADLINE
+        ]
+
+        later = [
+            s for s in all_slots
+            if s["date"] > DEADLINE
+        ]
+
+        print(f"Before deadline: {len(early)}")
+        print(f"After deadline: {len(later)}")
+
+        # ---------------------------------------------------
+        # FOUND BEFORE DEADLINE
+        # ---------------------------------------------------
 
         if early:
+
             lines = "\n".join(
                 f"- {s['date'].strftime('%a %d.%m.%Y')} at {s['time']}"
-                for s in early[:5]
+                for s in early[:10]
             )
+
             msg = (
                 f"MIGRI SLOT FOUND!\n\n"
-                f"Helsinki (Malmi) - Permanent Residence\n\n"
-                f"{len(early)} slot(s) before {DEADLINE_DATE}:\n"
+                f"Helsinki (Malmi)\n\n"
+                f"{len(early)} slot(s) before {DEADLINE_DATE}:\n\n"
                 f"{lines}\n\n"
-                f"Book now: migri.vihta.com\n"
+                f"Book now:\n"
+                f"migri.vihta.com\n\n"
                 f"Checked: {checked_at}"
             )
+
             telegram(msg)
-            print(f"ALERT: Sent telegram message with {len(early)} slots!")
+
+            print("ALERT SENT")
+
+        # ---------------------------------------------------
+        # ONLY LATER SLOTS
+        # ---------------------------------------------------
 
         elif later:
+
             earliest = later[0]
+
             msg = (
-                f"Migri checked - no slots before {DEADLINE_DATE}\n\n"
-                f"Earliest available alternative:\n"
-                f"{earliest['date'].strftime('%A %d.%m.%Y')} at {earliest['time']}\n"
-                f"Office: Helsinki (Malmi)\n\n"
+                f"No slots before {DEADLINE_DATE}\n\n"
+                f"Earliest available:\n"
+                f"{earliest['date'].strftime('%A %d.%m.%Y')} "
+                f"at {earliest['time']}\n\n"
                 f"Checked: {checked_at}"
             )
+
             telegram(msg)
-            print(f"No early slots. Earliest found layout: {earliest['date']} {earliest['time']}")
+
+            print("Only later slots found")
+
+        # ---------------------------------------------------
+        # NOTHING
+        # ---------------------------------------------------
 
         else:
-            telegram(f"Migri checked - no appointments visible\nChecked: {checked_at}")
-            print("No slots found at all across tracked parameters.")
+
+            telegram(
+                f"Migri checked - no appointments visible\n"
+                f"Checked: {checked_at}"
+            )
+
+            print("No slots found at all")
 
     except Exception as e:
+
         import traceback
+
         traceback.print_exc()
-        telegram(f"Migri checker error:\n{str(e)[:300]}")
+
+        telegram(
+            f"Migri checker error:\n"
+            f"{str(e)[:300]}"
+        )
 
 
 if __name__ == "__main__":
