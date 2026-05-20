@@ -1,16 +1,14 @@
 import asyncio
 import re
+import os
 from datetime import datetime
 import requests
 
-# ─────────────────────────────────────────
-# SETTINGS
-# ─────────────────────────────────────────
-TELEGRAM_TOKEN  = "8729890482:AAHH9BtKBUjYCLDMVKedclifWZ6mS8dTSvE"
-TELEGRAM_CHAT   = "90616504"
+# Read from environment variables (set by GitHub Secrets)
+TELEGRAM_TOKEN  = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_CHAT   = os.environ["TELEGRAM_CHAT"]
 DEADLINE_DATE   = "2026-08-08"  # change this to your deadline
 MIGRI_URL       = "https://migri.vihta.com/public/migri/#/reservation"
-# ─────────────────────────────────────────
 
 DEADLINE = datetime.strptime(DEADLINE_DATE, "%Y-%m-%d").date()
 
@@ -30,7 +28,7 @@ def telegram(message):
 async def get_slots():
     from playwright.async_api import async_playwright
 
-    slots = []  # list of dicts: {date, time, office}
+    slots = []
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -69,53 +67,19 @@ async def get_slots():
         await page.locator("[data-ng-click='searchDesktop()']").click()
         await page.wait_for_timeout(8000)
 
-        # Step 5: Parse the calendar table properly
-        # The page shows a table where:
-        # - Column headers are dates like "Ma 10.08." "Ti 11.08." etc
-        # - Each cell contains time buttons like "08:15", "09:30" etc
-        # We need to match each time to its date column
-
-        print("Step 5: Parsing calendar table...")
-
-        # Get all column headers (dates)
-        # They appear as "Ma 10.08." "Ti 11.08." etc
-        page_text = await page.inner_text("body")
-
-        # Extract date headers from the calendar
-        # Format: "Ma\n10.08." or "Ma 10.08."
-        date_headers = re.findall(r'(?:Ma|Ti|Ke|To|Pe|La|Su)\s+(\d{1,2}\.\d{2}\.)', page_text)
-        print(f"Date headers found: {date_headers}")
-
-        # Current year
+        # Step 5: Parse calendar table using JavaScript
+        print("Step 5: Parsing calendar...")
         year = datetime.now().year
 
-        # Parse full dates
-        parsed_dates = []
-        for d in date_headers:
-            try:
-                # d is like "10.08." -> add year
-                full = d.rstrip('.') + f".{year}"
-                dt = datetime.strptime(full, "%d.%m.%Y").date()
-                parsed_dates.append(dt)
-            except Exception as e:
-                print(f"  Date parse error: {d} -> {e}")
-
-        print(f"Parsed dates: {parsed_dates}")
-
-        # Now get the table cells - use JavaScript to read the table structure
-        # This gives us each cell's column index and its time buttons
         result = await page.evaluate("""
             () => {
                 const slots = [];
-                // Find the results table
                 const table = document.querySelector('table');
-                if (!table) return {error: 'no table found'};
+                if (!table) return {error: 'no table'};
 
-                // Get header row dates
                 const headerCells = Array.from(table.querySelectorAll('th'));
                 const dates = headerCells.map(th => th.innerText.trim());
 
-                // Get data rows
                 const rows = Array.from(table.querySelectorAll('tbody tr'));
                 rows.forEach(row => {
                     const cells = Array.from(row.querySelectorAll('td'));
@@ -125,26 +89,24 @@ async def get_slots():
                             .filter(t => /^\\d{1,2}:\\d{2}$/.test(t));
                         if (times.length > 0) {
                             slots.push({
-                                date: dates[colIndex + 1] || 'unknown',
+                                date: dates[colIndex + 1] || '',
                                 times: times
                             });
                         }
                     });
                 });
 
-                return {dates, slots};
+                return {slots};
             }
         """)
 
-        print(f"JS table result: {str(result)[:500]}")
+        print(f"JS result: {str(result)[:300]}")
 
         if isinstance(result, dict) and result.get('slots'):
             for cell in result['slots']:
-                date_text = cell['date']  # e.g. "Ma\n10.08."
-                # Extract date like "10.08."
-                date_match = re.search(r'(\d{1,2}\.\d{2}\.)', date_text)
+                date_match = re.search(r'(\d{1,2}\.\d{2})', cell['date'])
                 if date_match:
-                    date_str = date_match.group(1).rstrip('.')
+                    date_str = date_match.group(1)
                     try:
                         full_date = datetime.strptime(f"{date_str}.{year}", "%d.%m.%Y").date()
                         for t in cell['times']:
@@ -153,32 +115,25 @@ async def get_slots():
                                 'time': t,
                                 'office': 'Helsinki (Malmi)',
                             })
-                            print(f"  Slot: {full_date} {t} @ Helsinki (Malmi)")
+                            print(f"  Slot: {full_date} {t}")
                     except Exception as e:
-                        print(f"  Parse error: {e}")
+                        print(f"  Date error: {e}")
         else:
-            # Fallback: match dates to times from page text
-            print("Fallback: matching dates to times from page text...")
-            # The page text has dates and times in order
-            # Find blocks like "Ma\n10.08.\n14:45\n08:15..."
+            # Fallback: extract from page text
+            page_text = await page.inner_text("body")
             blocks = re.findall(
-                r'(?:Ma|Ti|Ke|To|Pe|La|Su)\s+(\d{1,2}\.\d{2}\.)\s*((?:\d{1,2}:\d{2}\s*)+)',
+                r'(?:Ma|Ti|Ke|To|Pe|La|Su)\s+(\d{1,2}\.\d{2})\.\s*((?:\d{1,2}:\d{2}\s*)+)',
                 page_text
             )
             for date_str, times_str in blocks:
                 times = re.findall(r'\d{1,2}:\d{2}', times_str)
-                date_str = date_str.rstrip('.')
                 try:
                     full_date = datetime.strptime(f"{date_str}.{year}", "%d.%m.%Y").date()
                     for t in times:
-                        slots.append({
-                            'date': full_date,
-                            'time': t,
-                            'office': 'Helsinki (Malmi)',
-                        })
+                        slots.append({'date': full_date, 'time': t, 'office': 'Helsinki (Malmi)'})
                         print(f"  Fallback slot: {full_date} {t}")
                 except Exception as e:
-                    print(f"  Fallback parse error: {e}")
+                    print(f"  Fallback error: {e}")
 
         await browser.close()
     return slots
@@ -190,17 +145,12 @@ async def main():
 
     try:
         all_slots = await get_slots()
-        print(f"Total slots found: {len(all_slots)}")
+        print(f"Total slots: {len(all_slots)}")
 
-        # Filter by deadline
-        early = [s for s in all_slots if s['date'] <= DEADLINE]
-        later = [s for s in all_slots if s['date'] > DEADLINE]
+        early = sorted([s for s in all_slots if s['date'] <= DEADLINE], key=lambda s: (s['date'], s['time']))
+        later = sorted([s for s in all_slots if s['date'] > DEADLINE], key=lambda s: (s['date'], s['time']))
 
-        early.sort(key=lambda s: (s['date'], s['time']))
-        later.sort(key=lambda s: (s['date'], s['time']))
-
-        print(f"Early slots (before {DEADLINE_DATE}): {len(early)}")
-        print(f"Later slots: {len(later)}")
+        print(f"Before deadline: {len(early)}, After: {len(later)}")
 
         if early:
             lines = "\n".join(
@@ -216,7 +166,7 @@ async def main():
                 f"Checked: {checked_at}"
             )
             telegram(msg)
-            print(f"ALERT sent: {len(early)} early slots")
+            print(f"ALERT: {len(early)} early slots!")
 
         elif later:
             earliest = later[0]
@@ -231,12 +181,8 @@ async def main():
             print(f"No early slots. Earliest: {earliest['date']} {earliest['time']}")
 
         else:
-            msg = (
-                f"Migri checked - no appointments visible\n"
-                f"Checked: {checked_at}"
-            )
-            telegram(msg)
-            print("No slots found at all")
+            telegram(f"Migri checked - no appointments visible\nChecked: {checked_at}")
+            print("No slots found")
 
     except Exception as e:
         import traceback
