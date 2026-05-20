@@ -143,9 +143,7 @@ async def get_slots():
                 break
 
             # Click next week button - use desktop version (not mobile)
-            next_btn = page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])")
-            if await next_btn.count() == 0:
-                next_btn = page.locator("[data-ng-click='nextWeek()']").first
+            next_btn = page.locator("[data-ng-click='nextWeek()']:not([id*='mobile'])").first
             await next_btn.click()
             print(f"Clicked next week")
             await page.wait_for_timeout(2000)
